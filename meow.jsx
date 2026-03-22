@@ -11,191 +11,8 @@ window.addEventListener("error", (event) => {
   // Don't prevent default here — let the ErrorBoundary handle React errors
 });
 
-const API = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "stepfun/step-3.5-flash:free";
-const MODEL_FALLBACKS = [
-  DEFAULT_MODEL,
-  "qwen/qwen3-coder:free",
-];
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "qwen/qwen3-32b"; // Default model for Groq key
-// ─── Agent Skills Registry ───
-// Pre-listed skills the AI can invoke during processing. Organized by category.
-const SKILLS_REGISTRY = {
-  // ── Data & Information ──
-  "data-analysis": {
-    id: "data-analysis", category: "data", name: "Data Analysis",
-    description: "Analyze datasets, compute statistics, identify patterns, and provide data-driven insights.",
-    triggers: ["analyze", "statistics", "dataset", "csv data", "json data", "mean", "median", "average", "trend", "correlation", "outlier"],
-  },
-  "data-visualization": {
-    id: "data-visualization", category: "data", name: "Data Visualization",
-    description: "Create text-based charts, graphs, and visual data representations.",
-    triggers: ["chart", "graph", "plot", "visualize", "bar chart", "histogram", "pie chart", "visualization"],
-  },
-  "fact-checker": {
-    id: "fact-checker", category: "data", name: "Fact Checker",
-    description: "Verify claims, cross-reference information across multiple sources.",
-    triggers: ["is this true", "verify", "fact check", "is it true", "confirm", "debunk", "misinformation"],
-  },
-  "summarizer": {
-    id: "summarizer", category: "data", name: "Summarizer",
-    description: "Condense long texts, articles, and documents into clear summaries.",
-    triggers: ["summarize", "summary", "tldr", "tl;dr", "key points", "gist", "condense", "brief"],
-  },
-  "json-csv-parser": {
-    id: "json-csv-parser", category: "data", name: "JSON & CSV Parser",
-    description: "Parse, transform, query, and convert between JSON, CSV, and structured data formats.",
-    triggers: ["parse json", "parse csv", "convert json", "convert csv", "json to", "csv to", "tsv", "transform data"],
-  },
-
-  // ── Tool Usage ──
-  "file-converter": {
-    id: "file-converter", category: "tools", name: "File Converter",
-    description: "Convert between file formats: JSON, CSV, XML, YAML, HTML, Markdown, and more.",
-    triggers: ["convert to", "export as", "save as", "transform to", "json to csv", "csv to json", "xml to", "yaml to"],
-  },
-  "regex-builder": {
-    id: "regex-builder", category: "tools", name: "Regex Builder",
-    description: "Build, test, explain, and debug regular expressions.",
-    triggers: ["regex", "regular expression", "pattern matching", "match pattern", "validate format", "regexp"],
-  },
-  "api-tester": {
-    id: "api-tester", category: "tools", name: "API Tester",
-    description: "Test REST API endpoints, construct requests, and analyze responses.",
-    triggers: ["test api", "api request", "http request", "fetch endpoint", "curl", "rest api", "status code"],
-  },
-  "text-tools": {
-    id: "text-tools", category: "tools", name: "Text Tools",
-    description: "Encode/decode, case conversion, word counts, text transformation, and manipulation.",
-    triggers: ["encode", "decode", "base64", "url encode", "word count", "character count", "uppercase", "lowercase", "camelcase", "snake_case"],
-  },
-  "timestamp-converter": {
-    id: "timestamp-converter", category: "tools", name: "Timestamp Converter",
-    description: "Convert between date formats, timezones, Unix timestamps, and human-readable dates.",
-    triggers: ["timestamp", "unix time", "epoch", "convert date", "timezone", "iso 8601", "date format"],
-  },
-
-  // ── Math & Science ──
-  "calculator": {
-    id: "calculator", category: "math", name: "Advanced Calculator",
-    description: "Perform calculations from basic arithmetic to financial math, algebra, and number theory.",
-    triggers: ["calculate", "compute", "solve", "what is", "how much", "percentage", "interest", "mortgage", "factorial", "prime"],
-  },
-  "unit-converter": {
-    id: "unit-converter", category: "math", name: "Unit Converter",
-    description: "Convert between units: length, weight, temperature, volume, speed, data, and more.",
-    triggers: ["convert", "how many", "miles to", "kg to", "fahrenheit", "celsius", "liters to", "bytes to"],
-  },
-  "statistics": {
-    id: "statistics", category: "math", name: "Statistics",
-    description: "Descriptive stats, probability, distributions, correlation, and regression analysis.",
-    triggers: ["standard deviation", "probability", "distribution", "regression", "correlation", "p-value", "confidence interval", "hypothesis"],
-  },
-  "science-helper": {
-    id: "science-helper", category: "math", name: "Science Helper",
-    description: "Physics, chemistry, and biology formulas, constants, and calculations.",
-    triggers: ["physics", "chemistry", "biology", "formula", "element", "molecule", "force", "energy", "velocity", "acceleration", "periodic table"],
-  },
-  "geometry": {
-    id: "geometry", category: "math", name: "Geometry",
-    description: "Areas, volumes, perimeters, angles, trigonometry, and coordinate geometry.",
-    triggers: ["area", "volume", "perimeter", "angle", "triangle", "circle", "sphere", "pythagorean", "trigonometry", "distance between"],
-  },
-
-  // ── Coding ──
-  "code-reviewer": {
-    id: "code-reviewer", category: "coding", name: "Code Reviewer",
-    description: "Review code for bugs, performance, security, and style issues.",
-    triggers: ["review code", "code review", "what's wrong", "check my code", "any bugs", "improve code", "code quality"],
-  },
-  "code-generator": {
-    id: "code-generator", category: "coding", name: "Code Generator",
-    description: "Generate code snippets, functions, classes, and modules in any language.",
-    triggers: ["write code", "create function", "generate", "build a", "implement", "make a function", "code for"],
-  },
-  "debugger": {
-    id: "debugger", category: "coding", name: "Debugger",
-    description: "Debug code: identify bugs, trace errors, explain stack traces, and provide fixes.",
-    triggers: ["debug", "error", "bug", "doesn't work", "crashes", "stack trace", "exception", "fix this", "broken code"],
-  },
-  "explainer": {
-    id: "explainer", category: "coding", name: "Code Explainer",
-    description: "Explain code line-by-line, break down algorithms, and teach programming concepts.",
-    triggers: ["explain", "what does this do", "how does this work", "break down", "walk through", "teach me", "understand"],
-  },
-  "refactorer": {
-    id: "refactorer", category: "coding", name: "Refactorer",
-    description: "Refactor code for readability, performance, and maintainability.",
-    triggers: ["refactor", "clean up", "improve", "optimize", "modernize", "simplify code", "make readable"],
-  },
-  "snippet-library": {
-    id: "snippet-library", category: "coding", name: "Snippet Library",
-    description: "Ready-to-use code snippets for common programming tasks.",
-    triggers: ["snippet", "how do i", "example of", "template for", "boilerplate", "starter code"],
-  },
-
-  // ── Accessibility ──
-  "a11y-checker": {
-    id: "a11y-checker", category: "accessibility", name: "Accessibility Checker",
-    description: "Audit web content for WCAG 2.1 compliance, identify issues, and suggest fixes.",
-    triggers: ["accessibility", "a11y", "wcag", "ada compliance", "accessible", "audit accessibility"],
-  },
-  "alt-text-generator": {
-    id: "alt-text-generator", category: "accessibility", name: "Alt Text Generator",
-    description: "Generate descriptive alt text for images following accessibility best practices.",
-    triggers: ["alt text", "image description", "describe image", "alt attribute", "screen reader image"],
-  },
-  "color-contrast": {
-    id: "color-contrast", category: "accessibility", name: "Color Contrast Checker",
-    description: "Check color contrast ratios for WCAG compliance and suggest accessible colors.",
-    triggers: ["contrast ratio", "color contrast", "readable colors", "wcag contrast", "color accessibility"],
-  },
-  "screen-reader-guide": {
-    id: "screen-reader-guide", category: "accessibility", name: "Screen Reader Guide",
-    description: "Optimize content for screen readers, write ARIA attributes, and ensure AT compatibility.",
-    triggers: ["screen reader", "aria", "aria-label", "assistive technology", "voiceover", "nvda", "jaws"],
-  },
-  "keyboard-navigation": {
-    id: "keyboard-navigation", category: "accessibility", name: "Keyboard Navigation",
-    description: "Ensure interfaces are fully keyboard-operable with proper focus management.",
-    triggers: ["keyboard", "tab order", "focus", "keyboard navigation", "keyboard accessible", "focus trap", "skip nav"],
-  },
-};
-
-// Build skills summary for system prompt
-function buildSkillsSummary() {
-  const categories = {};
-  for (const skill of Object.values(SKILLS_REGISTRY)) {
-    if (!categories[skill.category]) categories[skill.category] = [];
-    categories[skill.category].push(skill);
-  }
-  const labels = { data: "Data & Information", tools: "Tool Usage", math: "Math & Science", coding: "Coding", accessibility: "Accessibility" };
-  let summary = "";
-  for (const [cat, skills] of Object.entries(categories)) {
-    summary += `\n### ${labels[cat] || cat}\n`;
-    for (const s of skills) {
-      summary += `- **${s.name}** (\`${s.id}\`): ${s.description}\n`;
-    }
-  }
-  return summary;
-}
-
-// Detect which skills are relevant to a user message
-function detectRelevantSkills(message) {
-  if (!message || typeof message !== "string") return [];
-  const lower = message.toLowerCase();
-  const matched = [];
-  for (const skill of Object.values(SKILLS_REGISTRY)) {
-    for (const trigger of skill.triggers) {
-      if (lower.includes(trigger)) {
-        matched.push(skill);
-        break;
-      }
-    }
-  }
-  return matched;
-}
+const GROQ_MODEL = "qwen/qwen3-32b";
 
 // ─── Persistent Storage ───
 const CHAT_STORAGE_KEY = "auto-chat";
@@ -267,20 +84,6 @@ async function saveChat(msgs) {
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
-async function loadApiKey() {
-  try {
-    if (window.storage?.get) {
-      const r = await window.storage.get("openrouter-api-key");
-      if (r?.value) return String(r.value).trim();
-    }
-  } catch {}
-  try { return (window.localStorage.getItem("openrouter-api-key") || "").trim(); } catch { return ""; }
-}
-async function saveApiKey(val) {
-  const n = (val || "").trim();
-  try { if (window.storage?.set) await window.storage.set("openrouter-api-key", n); } catch {}
-  try { window.localStorage.setItem("openrouter-api-key", n); } catch {}
-}
 async function loadGroqKey() {
   try {
     if (window.storage?.get) {
@@ -294,9 +97,6 @@ async function saveGroqKey(val) {
   const n = (val || "").trim();
   try { if (window.storage?.set) await window.storage.set("groq-api-key", n); } catch {}
   try { window.localStorage.setItem("groq-api-key", n); } catch {}
-}
-function readEnvApiKey() {
-  return (window.OPENROUTER_API_KEY || window.__OPENROUTER_API_KEY__ || window?.env?.OPENROUTER_API_KEY || "").trim();
 }
 function readEnvGroqKey() {
   return (window.GROQ_API_KEY || window.__GROQ_API_KEY__ || window?.env?.GROQ_API_KEY || "").trim();
@@ -421,38 +221,21 @@ function Auto() {
   const [mem, setMem] = useState("");
   const [memDraft, setMemDraft] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarTab, setSidebarTab] = useState("memory"); // "memory" | "terminal"
   const [usage, setUsage] = useState({ i: 0, o: 0 });
-  const [apiKey, setApiKey] = useState("");
   const [groqApiKey, setGroqApiKey] = useState("");
   const [activityStatus, setActivityStatus] = useState("");
   const [expression, setExpression] = useState("happy"); // "happy" | "serious" | "veryHappy"
   const [isBlinking, setIsBlinking] = useState(false);
   const blinkRef = useRef(null);
-  const [terminalHistory, setTerminalHistory] = useState([{ type: "system", text: "Auto Terminal v1.0 — JavaScript execution environment\nType JavaScript code and press Enter to execute.\nUse clear() to clear the terminal.\n" }]);
-  const [terminalInput, setTerminalInput] = useState("");
-  const [terminalCmdHistory, setTerminalCmdHistory] = useState([]);
-  const [terminalHistoryIdx, setTerminalHistoryIdx] = useState(-1);
   const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const attachInputRef = useRef(null);
   const abortRef = useRef(null);
-  const terminalScrollRef = useRef(null);
-  const terminalInputRef = useRef(null);
   const msgsRef = useRef([]);
   const memRef = useRef("");
   const busyRef = useRef(false);
-
-  const promptForApiKey = useCallback((reason = "Enter your OpenRouter API key:") => {
-    const enteredKey = window.prompt(reason);
-    const normalizedKey = (enteredKey || "").trim();
-    if (!normalizedKey) return "";
-    setApiKey(normalizedKey);
-    saveApiKey(normalizedKey);
-    return normalizedKey;
-  }, []);
 
   const promptForGroqKey = useCallback((reason = "Enter your Groq API key:") => {
     const enteredKey = window.prompt(reason);
@@ -462,53 +245,6 @@ function Auto() {
     saveGroqKey(normalizedKey);
     return normalizedKey;
   }, []);
-
-  // ─── Terminal execution ───
-  const executeTerminal = useCallback((code) => {
-    if (!code.trim()) return;
-    const entry = { type: "input", text: code };
-    const newHistory = [...terminalHistory, entry];
-
-    if (code.trim() === "clear()") {
-      setTerminalHistory([{ type: "system", text: "Terminal cleared.\n" }]);
-      return;
-    }
-
-    // Capture console output
-    const logs = [];
-    const origLog = console.log;
-    const origWarn = console.warn;
-    const origError = console.error;
-    const origInfo = console.info;
-    const stringify = (args) => args.map(a => {
-      if (a === undefined) return "undefined";
-      if (a === null) return "null";
-      if (typeof a === "object") { try { return JSON.stringify(a, null, 2); } catch { return String(a); } }
-      return String(a);
-    }).join(" ");
-    console.log = (...args) => { logs.push({ level: "log", text: stringify(args) }); origLog(...args); };
-    console.warn = (...args) => { logs.push({ level: "warn", text: stringify(args) }); origWarn(...args); };
-    console.error = (...args) => { logs.push({ level: "error", text: stringify(args) }); origError(...args); };
-    console.info = (...args) => { logs.push({ level: "info", text: stringify(args) }); origInfo(...args); };
-
-    let result;
-    try {
-      // eslint-disable-next-line no-eval
-      result = { type: "output", text: String(eval(code)), logs };
-    } catch (e) {
-      result = { type: "error", text: String(e), logs };
-    }
-
-    console.log = origLog;
-    console.warn = origWarn;
-    console.error = origError;
-    console.info = origInfo;
-
-    setTerminalHistory([...newHistory, result]);
-    setTerminalCmdHistory(prev => [...prev, code]);
-    setTerminalHistoryIdx(-1);
-    setTimeout(() => { terminalScrollRef.current?.scrollIntoView({ behavior: "smooth" }); }, 50);
-  }, [terminalHistory]);
 
   // Load on mount
   useEffect(() => {
@@ -520,12 +256,6 @@ function Auto() {
       const storedGroqKey = await loadGroqKey();
       if (storedGroqKey) { setGroqApiKey(storedGroqKey); return; }
       promptForGroqKey();
-    })();
-    (async () => {
-      const envKey = readEnvApiKey();
-      if (envKey) { setApiKey(envKey); return; }
-      const storedKey = await loadApiKey();
-      if (storedKey) setApiKey(storedKey);
     })();
   }, [promptForGroqKey]);
 
@@ -690,24 +420,6 @@ Even for simple greetings, update memory with at least the conversation timestam
 
     s += `
 
-## Terminal / Code Execution
-You have a built-in JavaScript terminal! You can execute code directly in the browser environment.
-
-To execute JavaScript code, include a <terminal_exec> tag in your response:
-<terminal_exec>console.log("Hello world!"); 2 + 2</terminal_exec>
-
-You can use this to:
-- Perform calculations and data processing
-- Test JavaScript code snippets
-- Manipulate data structures (arrays, objects, JSON)
-- Run utility functions (Date, Math, string operations, etc.)
-- Create and test functions
-- Access browser APIs (DOM, fetch, localStorage, etc.)
-
-You can chain multiple <terminal_exec> blocks in one response. The execution results (return value + console output) will be returned to you so you can continue the task.
-
-**Important**: Code runs in the browser context with full access to the page. Use this for calculations, data processing, and prototyping.
-
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
 - <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
@@ -715,25 +427,6 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 - <expression>veryHappy</expression> — use when celebrating, super excited, receiving amazing news, completing a big task successfully, or when the user achieves something great
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
-
-    // ─── Skills System ───
-    s += `\n\n## Agent Skills
-You have access to specialized skills that enhance your capabilities. Skills are automatically detected based on the user's message, but you can also invoke them explicitly.
-
-**Available Skills:**
-${buildSkillsSummary()}
-### How Skills Work
-- Skills are **auto-detected** from the user's message and their instructions are injected into your context
-- You can also explicitly invoke a skill by including \`<use_skill>skill-id</use_skill>\` in your response
-- Skills provide specialized instructions, formulas, templates, and workflows for their domain
-- Combine multiple skills when a task spans categories (e.g., data-analysis + data-visualization)
-- When a skill is active, follow its specific instructions for output format and methodology
-
-### Skill Usage Guidelines
-- Use the **most specific skill** that matches the task
-- For complex tasks, chain skills that fit the work: analyze → transform → explain
-- Skills enhance your existing capabilities — use them alongside memory and terminal workflows
-- Always verify computations with \`<terminal_exec>\` when a skill involves calculations`;
 
     return s;
   }, [mem]);
@@ -788,11 +481,6 @@ ${buildSkillsSummary()}
       .replace(/<web_read>[\s\S]*?<\/web_read>/g, "")
       .trim();
 
-    // Terminal execution: <terminal_exec>code here</terminal_exec>
-    for (const m of cleaned.matchAll(/<terminal_exec>([\s\S]*?)<\/terminal_exec>/g))
-      actions.terminalCommands.push(m[1].trim());
-    cleaned = cleaned.replace(/<terminal_exec>[\s\S]*?<\/terminal_exec>/g, "").trim();
-
     // Strip any remaining compatibility wrappers from display text
     cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
 
@@ -807,14 +495,13 @@ ${buildSkillsSummary()}
   }, []);
 
   // ─── Call AI API ───
-  const callAI = useCallback(async (apiMsgs, key, groqKey) => {
+  const callAI = useCallback(async (apiMsgs, groqKey) => {
     const buildBody = (model) => ({ model, messages: apiMsgs });
     let data = null;
-    let usedModel = DEFAULT_MODEL;
+    let usedModel = GROQ_MODEL;
     let lastErr = null;
     const delay = ms => new Promise(r => setTimeout(r, ms));
 
-    // Try Groq first (default) with retry on 429 rate limits
     if (groqKey) {
       const GROQ_MAX_RETRIES = 4;
       for (let attempt = 0; attempt < GROQ_MAX_RETRIES; attempt++) {
@@ -858,53 +545,6 @@ ${buildSkillsSummary()}
       }
     }
 
-    // Fall back to OpenRouter if Groq failed or unavailable
-    if (!data && key) {
-      for (const model of MODEL_FALLBACKS) {
-        const MAX_RETRIES = 3;
-        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-          let res;
-          try {
-            res = await fetch(API, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${key}`,
-                "HTTP-Referer": window.location.origin,
-                "X-Title": "Auto",
-              },
-              body: JSON.stringify(buildBody(model)),
-              signal: abortRef.current?.signal,
-            });
-          } catch (e) {
-            if (e.name === "AbortError") throw e;
-            lastErr = e;
-            break;
-          }
-
-          if (res.ok) {
-            data = await res.json();
-            usedModel = model;
-            break;
-          }
-
-          const rawBody = await res.text();
-          const msg = parseErrorMessage(rawBody, res.status);
-          lastErr = new Error(msg);
-
-          // Retry on 429 (rate limit) with exponential backoff
-          if (res.status === 429 && attempt < MAX_RETRIES - 1) {
-            await delay(1500 * (attempt + 1));
-            continue;
-          }
-
-          // Non-retryable error — break inner retry loop, outer loop tries next model
-          break;
-        }
-        if (data) break;
-      }
-    }
-
     if (!data) throw lastErr || new Error("Failed to get a completion.");
     return { data, usedModel };
   }, []);
@@ -939,8 +579,7 @@ ${buildSkillsSummary()}
 
     try {
       let groqKey = (groqApiKey || readEnvGroqKey() || (await loadGroqKey()) || "").trim();
-      let key = (apiKey || readEnvApiKey() || (await loadApiKey()) || "").trim();
-      if (!groqKey && !key) {
+      if (!groqKey) {
         groqKey = promptForGroqKey("Missing API key. Enter your Groq API key:");
         if (!groqKey) throw new Error("Missing API key.");
       }
@@ -962,16 +601,7 @@ ${buildSkillsSummary()}
         if (currentMsgs.length > MAX_MSGS) {
           currentMsgs = currentMsgs.slice(-MAX_MSGS);
         }
-        // Detect relevant skills from the latest user message and inject context
-        const latestUserMsg = [...currentMsgs].reverse().find(m => m.role === "user");
-        const detectedSkills = latestUserMsg ? detectRelevantSkills(typeof latestUserMsg.content === "string" ? latestUserMsg.content : "") : [];
-        let systemContent = buildSystem();
-        if (detectedSkills.length > 0) {
-          systemContent += "\n\n## Active Skills for This Query\nThe following skills have been auto-detected as relevant. Apply their methodology:\n";
-          for (const skill of detectedSkills.slice(0, 4)) {
-            systemContent += `\n**[${skill.name}]** (${skill.id}): ${skill.description}\n`;
-          }
-        }
+        const systemContent = buildSystem();
         const apiMsgs = [
           { role: "system", content: systemContent },
           ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
@@ -983,7 +613,7 @@ ${buildSkillsSummary()}
           await new Promise(r => setTimeout(r, 800));
         }
 
-        const { data, usedModel } = await callAI(apiMsgs, key, groqKey);
+        const { data, usedModel } = await callAI(apiMsgs, groqKey);
         if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
         let rawContent = typeof data.choices?.[0]?.message?.content === "string"
@@ -1026,64 +656,6 @@ ${buildSkillsSummary()}
         setMsgs([...currentMsgs]);
         saveChat(currentMsgs);
 
-        // ─── Terminal Command Execution ───
-        if (actions.terminalCommands.length > 0) {
-          researchRound++;
-          let termContext = "";
-          for (const code of actions.terminalCommands) {
-           try {
-            setActivityStatus(`Terminal: executing code...`);
-            // Capture console output
-            const logs = [];
-            const origLog = console.log, origWarn = console.warn, origError = console.error;
-            const stringify = (args) => args.map(a => {
-              if (a === undefined) return "undefined";
-              if (a === null) return "null";
-              if (typeof a === "object") { try { return JSON.stringify(a, null, 2); } catch { return String(a); } }
-              return String(a);
-            }).join(" ");
-            console.log = (...args) => { logs.push(stringify(args)); origLog(...args); };
-            console.warn = (...args) => { logs.push("[warn] " + stringify(args)); origWarn(...args); };
-            console.error = (...args) => { logs.push("[error] " + stringify(args)); origError(...args); };
-
-            let result;
-            try {
-              // eslint-disable-next-line no-eval
-              const evalResult = eval(code);
-              const resultStr = evalResult !== undefined ? String(evalResult) : "(no return value)";
-              const consoleOutput = logs.length > 0 ? "\nConsole output:\n" + logs.join("\n") : "";
-              result = `<terminal_result>\n$ ${code}\n=> ${resultStr}${consoleOutput}\n</terminal_result>`;
-              // Add to terminal UI
-              setTerminalHistory(prev => [...prev, { type: "input", text: code }, { type: "output", text: resultStr, logs: logs.map(l => ({ level: "log", text: l })) }]);
-            } catch (e) {
-              const consoleOutput = logs.length > 0 ? "\nConsole output:\n" + logs.join("\n") : "";
-              result = `<terminal_result error="true">\n$ ${code}\nError: ${String(e)}${consoleOutput}\n</terminal_result>`;
-              setTerminalHistory(prev => [...prev, { type: "input", text: code }, { type: "error", text: String(e), logs: logs.map(l => ({ level: "log", text: l })) }]);
-            }
-
-            console.log = origLog;
-            console.warn = origWarn;
-            console.error = origError;
-            termContext += "\n\n" + result;
-           } catch (termErr) {
-            console.warn("Terminal execution wrapper failed:", termErr);
-            termContext += `\n\n<terminal_result error="true">Terminal execution failed: ${termErr.message || "unknown error"}</terminal_result>`;
-           }
-          }
-
-          currentMsgs = [...currentMsgs, {
-            role: "user",
-            content: `[SYSTEM: Terminal execution results]${termContext}\n\nContinue your task. You can execute more code or provide your answer.`
-          }];
-          setMsgs([...currentMsgs]);
-          saveChat(currentMsgs); // Save after each terminal round
-          continue;
-        }
-
-        // No more research needed
-        if (usedModel !== DEFAULT_MODEL) {
-          setErr(`Primary model unavailable; used ${usedModel}.`);
-        }
         break;
       }
     } catch (e) {
@@ -1096,7 +668,7 @@ ${buildSkillsSummary()}
       setActivityStatus("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, groqApiKey, promptForApiKey, attachments]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, groqApiKey, promptForGroqKey, attachments]);
 
   // ─── Expression image resolver — blink overrides all other states ───
   const getExprImg = useCallback((speakingOverride = false) => {
@@ -1134,20 +706,8 @@ ${buildSkillsSummary()}
             <button onClick={() => setSidebarOpen(false)} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "16px" }}>×</button>
           </div>
 
-          {/* Sidebar Tabs */}
-          <div style={{ display: "flex", borderBottom: "1px solid var(--bd)" }}>
-            <button
-              onClick={() => setSidebarTab("memory")}
-              style={{ flex: 1, padding: "8px", background: sidebarTab === "memory" ? "rgba(124,224,138,0.08)" : "transparent", border: "none", borderBottom: sidebarTab === "memory" ? "2px solid var(--ac)" : "2px solid transparent", color: sidebarTab === "memory" ? "var(--ac)" : "var(--dm)", cursor: "pointer", fontSize: "11px", fontFamily: "var(--m)", fontWeight: 600 }}
-            >Memory</button>
-            <button
-              onClick={() => setSidebarTab("terminal")}
-              style={{ flex: 1, padding: "8px", background: sidebarTab === "terminal" ? "rgba(200,160,255,0.08)" : "transparent", border: "none", borderBottom: sidebarTab === "terminal" ? "2px solid #c8a0ff" : "2px solid transparent", color: sidebarTab === "terminal" ? "#c8a0ff" : "var(--dm)", cursor: "pointer", fontSize: "11px", fontFamily: "var(--m)", fontWeight: 600 }}
-            >Terminal</button>
-          </div>
-
           {/* ─── Memory Tab ─── */}
-          {sidebarTab === "memory" && (
+          {(
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               <textarea
                 value={memDraft}
@@ -1167,86 +727,6 @@ ${buildSkillsSummary()}
             </div>
           )}
 
-          {/* ─── Terminal Tab ─── */}
-          {sidebarTab === "terminal" && (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: "#0a0a10" }}>
-              <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", fontFamily: "var(--m)", fontSize: "11px", lineHeight: 1.6 }}>
-                {terminalHistory.map((entry, i) => (
-                  <div key={i} style={{ marginBottom: "2px" }}>
-                    {entry.type === "system" && (
-                      <div style={{ color: "#c8a0ff", whiteSpace: "pre-wrap", opacity: 0.7 }}>{entry.text}</div>
-                    )}
-                    {entry.type === "input" && (
-                      <div style={{ color: "#7ce08a" }}>
-                        <span style={{ color: "#c8a0ff", marginRight: "6px" }}>{">"}</span>
-                        <span style={{ whiteSpace: "pre-wrap" }}>{entry.text}</span>
-                      </div>
-                    )}
-                    {entry.type === "output" && (
-                      <div>
-                        {entry.logs && entry.logs.map((log, li) => (
-                          <div key={li} style={{ color: log.level === "error" ? "#cc7777" : log.level === "warn" ? "#ccaa55" : "#88bbcc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>
-                            {log.text}
-                          </div>
-                        ))}
-                        <div style={{ color: "#ccc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>{entry.text !== "undefined" ? entry.text : ""}</div>
-                      </div>
-                    )}
-                    {entry.type === "error" && (
-                      <div>
-                        {entry.logs && entry.logs.map((log, li) => (
-                          <div key={li} style={{ color: log.level === "error" ? "#cc7777" : "#88bbcc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>
-                            {log.text}
-                          </div>
-                        ))}
-                        <div style={{ color: "#cc7777", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>{entry.text}</div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <div ref={terminalScrollRef} />
-              </div>
-              <div style={{ padding: "6px 8px", borderTop: "1px solid var(--bd)", display: "flex", alignItems: "center", gap: "4px", background: "rgba(0,0,0,0.3)" }}>
-                <span style={{ color: "#c8a0ff", fontFamily: "var(--m)", fontSize: "12px", flexShrink: 0 }}>{">"}</span>
-                <input
-                  ref={terminalInputRef}
-                  value={terminalInput}
-                  onChange={e => setTerminalInput(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      executeTerminal(terminalInput);
-                      setTerminalInput("");
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      if (terminalCmdHistory.length > 0) {
-                        const newIdx = terminalHistoryIdx < 0 ? terminalCmdHistory.length - 1 : Math.max(0, terminalHistoryIdx - 1);
-                        setTerminalHistoryIdx(newIdx);
-                        setTerminalInput(terminalCmdHistory[newIdx] || "");
-                      }
-                    } else if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      if (terminalHistoryIdx >= 0) {
-                        const newIdx = terminalHistoryIdx + 1;
-                        if (newIdx >= terminalCmdHistory.length) {
-                          setTerminalHistoryIdx(-1);
-                          setTerminalInput("");
-                        } else {
-                          setTerminalHistoryIdx(newIdx);
-                          setTerminalInput(terminalCmdHistory[newIdx] || "");
-                        }
-                      }
-                    }
-                  }}
-                  placeholder="Run JavaScript snippets..."
-                  style={{ flex: 1, padding: "5px 6px", background: "rgba(255,255,255,0.03)", border: "1px solid var(--bd)", borderRadius: "4px", color: "#7ce08a", fontSize: "11px", fontFamily: "var(--m)", outline: "none" }}
-                />
-              </div>
-              <div style={{ padding: "4px 8px", borderTop: "1px solid var(--bd)", display: "flex", gap: "4px" }}>
-                <button onClick={() => setTerminalHistory([{ type: "system", text: "Terminal cleared.\n" }])} style={btn("#c8a0ff")}>Clear</button>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -1262,22 +742,15 @@ ${buildSkillsSummary()}
               onError={(e) => { e.target.style.display = "none"; }}
             />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq (qwen3-32b) · OpenRouter fallback</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq (qwen3-32b)</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => promptForGroqKey("Set or update your Groq API key:")}
               style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dg)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : "rgba(204,119,119,0.2)" }}
-              title={groqApiKey ? "Groq API key set (default)" : "Groq API key missing (default)"}
+              title={groqApiKey ? "Groq API key set" : "Groq API key missing"}
             >
               {groqApiKey ? "GROQ ✓" : "GROQ !"}
-            </button>
-            <button
-              onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
-              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
-              title={apiKey ? "OpenRouter API key set (fallback)" : "OpenRouter API key missing (fallback)"}
-            >
-              {apiKey ? "OpenRouter ✓" : "OpenRouter !"}
             </button>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button
@@ -1307,14 +780,6 @@ ${buildSkillsSummary()}
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {msgs.map((m, i) => {
-                // Hide terminal system messages from display
-                if (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM: Terminal execution results]")) {
-                  return (
-                    <div key={i} style={{ padding: "6px 10px", background: "rgba(200,160,255,0.05)", border: "1px solid rgba(200,160,255,0.12)", borderRadius: "8px", fontSize: "11px", color: "#c8a0ff", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "6px" }}>
-                      <span style={{ fontSize: "9px" }}>●</span> Terminal execution results received — AI continuing task...
-                    </div>
-                  );
-                }
                 return (
                   <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
                     {m.role === "assistant" && (
