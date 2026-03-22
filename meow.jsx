@@ -164,6 +164,41 @@ async function extractPdfContent(arrayBuffer, fileName) {
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
+// ─── Web Search via DuckDuckGo Instant Answer API ───
+// Used by Reviewer agents to research topics on the web.
+async function searchWeb(query) {
+  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
+  const data = await resp.json();
+
+  const lines = [];
+  if (data.AbstractText) {
+    lines.push(`Summary: ${data.AbstractText}`);
+    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
+  }
+  if (data.Answer) lines.push(`Direct answer: ${data.Answer}`);
+  if (data.RelatedTopics?.length) {
+    lines.push("Related topics:");
+    for (const topic of data.RelatedTopics.slice(0, 6)) {
+      if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
+      // Handle sub-topics
+      if (topic.Topics) {
+        for (const sub of topic.Topics.slice(0, 3)) {
+          if (sub.Text) lines.push(`    • ${sub.Text}`);
+        }
+      }
+    }
+  }
+  if (data.Results?.length) {
+    lines.push("Results:");
+    for (const r of data.Results.slice(0, 3)) {
+      if (r.Text) lines.push(`  - ${r.Text}${r.FirstURL ? ` (${r.FirstURL})` : ""}`);
+    }
+  }
+  return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
+}
+
 // ─── Markdown Renderer ───
 function Md({ text }) {
   if (!text) return null;
@@ -997,6 +1032,16 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     // Save user message immediately so it persists even if the AI call fails or page closes
     saveChat(currentMsgs);
 
+    // Helper: extract text content from an AI response object
+    const extractRaw = (data) => {
+      let raw = typeof data.choices?.[0]?.message?.content === "string"
+        ? data.choices[0].message.content
+        : Array.isArray(data.choices?.[0]?.message?.content)
+          ? data.choices[0].message.content.filter(p => p?.type === "text").map(p => p.text).join("\n")
+          : "";
+      return raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    };
+
     try {
       // Offline-only: require a loaded local model
       if (!localEngineRef.current) {
@@ -1004,82 +1049,162 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      let researchRound = 0;
       const MAX_MSGS = 80;
-      const MAX_RESEARCH_ROUNDS = 20; // Hard cap to prevent infinite loops
 
-      while (true) {
-        // Safety: break if research loop runs too long
-        if (researchRound > MAX_RESEARCH_ROUNDS) {
-          currentMsgs = [...currentMsgs, { role: "assistant", content: "I've completed extensive research across multiple rounds. Let me summarize what I've found so far." }];
-          setMsgs([...currentMsgs]);
-          saveChat(currentMsgs);
-          break;
+      // ─── STEP 1: Main planning — decide if web research is needed ───
+      setActivityStatus("Main agent analysing query...");
+      const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
+Respond ONLY with valid JSON in this exact format (no other text):
+{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
+or
+{"needs_research": false, "questions": []}
+
+Rules:
+- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
+- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
+- If true, provide 2–3 specific, searchable questions (max 3)
+- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
+
+      const planningMsgs = [
+        { role: "system", content: planningSystem },
+        { role: "user", content: `User question: "${txt || "See attached files"}"` },
+      ];
+
+      let researchQuestions = [];
+      try {
+        const { data: planData } = await callAI(planningMsgs);
+        if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
+        const planRaw = extractRaw(planData);
+        const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const plan = JSON.parse(jsonMatch[0]);
+          if (plan.needs_research && Array.isArray(plan.questions)) {
+            researchQuestions = plan.questions.slice(0, 3);
+          }
         }
-        // Trim messages to prevent unbounded context growth
-        if (currentMsgs.length > MAX_MSGS) {
-          currentMsgs = currentMsgs.slice(-MAX_MSGS);
+      } catch (planErr) {
+        // If planning fails, proceed without web research
+        console.warn("Planning step failed, skipping web research:", planErr);
+      }
+
+      // ─── STEP 2: Reviewer agents — search the web and summarise ───
+      const reviewerFindings = [];
+      for (let i = 0; i < researchQuestions.length; i++) {
+        const question = researchQuestions[i];
+        setActivityStatus(`Reviewer ${i + 1} of ${researchQuestions.length} researching: "${question}"...`);
+
+        // Fetch web search results
+        let searchResults = "";
+        try {
+          searchResults = await searchWeb(question);
+        } catch (searchErr) {
+          searchResults = `Search unavailable: ${searchErr.message}`;
         }
-        const systemContent = buildSystem();
-        const apiMsgs = [
-          { role: "system", content: systemContent },
-          ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
+
+        // Reviewer LLM summarises the search results
+        const reviewerSystem = `You are a web research reviewer assistant. You have searched the web and received results for a specific question.
+Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.
+If results are sparse or off-topic, say so clearly and note what is missing.`;
+
+        const reviewerMsgs = [
+          { role: "system", content: reviewerSystem },
+          { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
         ];
 
-        if (researchRound > 0) {
-          setActivityStatus(`Working... (round ${researchRound})`);
-          // Pace API calls to avoid 429 rate limits
-          await new Promise(r => setTimeout(r, 800));
+        try {
+          const { data: reviewerData } = await callAI(reviewerMsgs);
+          if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
+          const findings = extractRaw(reviewerData);
+          reviewerFindings.push({ question, findings });
+        } catch (reviewErr) {
+          reviewerFindings.push({ question, findings: `Reviewer error: ${reviewErr.message}` });
         }
-
-        const { data, usedModel } = await callAI(apiMsgs);
-        if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
-
-        let rawContent = typeof data.choices?.[0]?.message?.content === "string"
-          ? data.choices[0].message.content
-          : Array.isArray(data.choices?.[0]?.message?.content)
-            ? data.choices[0].message.content.filter(p => p?.type === "text").map(p => p.text).join("\n")
-            : "";
-        // Strip <think>...</think> blocks some models emit
-        rawContent = rawContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-
-        const { text, actions } = parseResponse(rawContent);
-
-        // Handle expression update
-        if (actions.expression) {
-          setExpression(actions.expression);
-        }
-
-        // Handle memory update — show in chat and save to file
-        if (actions.memoryUpdate) {
-          setMem(actions.memoryUpdate);
-          setMemDraft(actions.memoryUpdate);
-          saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
-          // Add a visible memory update note in chat
-          const memNote = { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*` };
-          if (text) {
-            currentMsgs = [...currentMsgs, memNote];
-          }
-        } else if (text) {
-          currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
-          // Auto-save a basic memory snapshot even if the AI didn't include <memory_update>
-          // This ensures every conversation is captured
-          const autoMemory = mem.trim()
-            ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
-            : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
-          setMem(autoMemory);
-          setMemDraft(autoMemory);
-          saveVal(MEMORY_STORAGE_KEY, autoMemory);
-        }
-
-        setMsgs([...currentMsgs]);
-        saveChat(currentMsgs);
-
-        break;
       }
+
+      // ─── STEP 3: Main agent synthesises with research context ───
+      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+
+      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
+
+      let mainSystem = buildSystem();
+      if (reviewerFindings.length > 0) {
+        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
+        for (const { question, findings } of reviewerFindings) {
+          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
+        }
+        mainSystem += `</web_research>`;
+      }
+
+      const mainApiMsgs = [
+        { role: "system", content: mainSystem },
+        ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
+      ];
+
+      const { data: mainData } = await callAI(mainApiMsgs);
+      if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
+      let mainRaw = extractRaw(mainData);
+
+      // ─── STEP 4: Final Reviewer — quick accuracy and completeness check ───
+      // Only run final review when web research was conducted (adds value checking cited facts)
+      let finalRaw = mainRaw;
+      if (reviewerFindings.length > 0) {
+        setActivityStatus("Final reviewer checking response...");
+        const finalReviewerSystem = `You are a final review agent (Light). Your job is to quickly check the following response for obvious errors or omissions before it is shown to the user.
+Check:
+1. Does it answer the user's actual question?
+2. Are any cited facts consistent with the web research provided?
+3. Are all required tags (<expression>, <memory_update>) present and intact?
+
+If the response is good, output it EXACTLY as-is — do not change a single word, tag, or character.
+If there is a clear error, fix ONLY that specific error and output the corrected version.
+CRITICAL: Preserve ALL tags exactly, especially <expression> and <memory_update> blocks.`;
+
+        const researchSummary = reviewerFindings.map(({ question, findings }) => `Q: ${question}\nFindings: ${findings}`).join("\n\n");
+        const finalMsgs = [
+          { role: "system", content: finalReviewerSystem },
+          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nWeb research used:\n${researchSummary}\n\nMain agent response to review:\n${mainRaw}` },
+        ];
+
+        try {
+          const { data: finalData } = await callAI(finalMsgs);
+          if (finalData.usage) setUsage(p => ({ i: p.i + (finalData.usage.prompt_tokens || 0), o: p.o + (finalData.usage.completion_tokens || 0) }));
+          finalRaw = extractRaw(finalData);
+          // Sanity check: if final reviewer mangled the tags, fall back to main response
+          if (!finalRaw.includes("<memory_update>") && mainRaw.includes("<memory_update>")) {
+            finalRaw = mainRaw;
+          }
+        } catch {
+          finalRaw = mainRaw; // Fall back to main response on reviewer error
+        }
+      }
+
+      // ─── Finalise: parse response and update state ───
+      const { text, actions } = parseResponse(finalRaw);
+
+      if (actions.expression) setExpression(actions.expression);
+
+      if (actions.memoryUpdate) {
+        setMem(actions.memoryUpdate);
+        setMemDraft(actions.memoryUpdate);
+        saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
+        if (text) {
+          currentMsgs = [...currentMsgs, { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*` }];
+        }
+      } else if (text) {
+        currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
+        const autoMemory = mem.trim()
+          ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
+          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
+        setMem(autoMemory);
+        setMemDraft(autoMemory);
+        saveVal(MEMORY_STORAGE_KEY, autoMemory);
+      }
+
+      setMsgs([...currentMsgs]);
+      saveChat(currentMsgs);
+
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
-      // Save whatever we have even on error
       try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
     } finally {
       setBusy(false);
