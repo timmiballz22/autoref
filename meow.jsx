@@ -287,41 +287,74 @@ function _isDomainInList(url, list) {
 }
 
 // ─── Persistent Storage ───
-async function loadVal(key) {
+const CHAT_STORAGE_KEY = "auto-chat";
+const LEGACY_CHAT_STORAGE_KEY = "meow-chat";
+const MEMORY_STORAGE_KEY = "auto-memory";
+const LEGACY_MEMORY_STORAGE_KEY = "meow-memory";
+
+async function loadVal(key, legacyKey = null) {
+  let value = "";
   try {
     if (window.storage?.get) {
       const r = await window.storage.get(key);
-      if (r?.value) return r.value;
+      if (r?.value) value = r.value;
     }
   } catch {}
-  try { return window.localStorage.getItem(key) || ""; } catch { return ""; }
+  if (!value) {
+    try { value = window.localStorage.getItem(key) || ""; } catch {}
+  }
+  if (!value && legacyKey) {
+    try {
+      if (window.storage?.get) {
+        const legacy = await window.storage.get(legacyKey);
+        if (legacy?.value) value = legacy.value;
+      }
+    } catch {}
+    if (!value) {
+      try { value = window.localStorage.getItem(legacyKey) || ""; } catch {}
+    }
+    if (value) saveVal(key, value);
+  }
+  return value || "";
 }
 async function saveVal(key, val) {
   // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(key, val); } catch {}
   try { window.localStorage.setItem(key, val); } catch {}
 }
+async function clearVal(key) {
+  try { if (window.storage?.set) await window.storage.set(key, ""); } catch {}
+  try { window.localStorage.removeItem(key); } catch {}
+}
 async function loadChat() {
-  // Try window.storage first, then localStorage fallback
-  try {
-    if (window.storage?.get) {
-      const r = await window.storage.get("meow-chat");
-      if (r?.value) { const parsed = JSON.parse(r.value); if (Array.isArray(parsed)) return parsed; }
+  const parseChat = (raw) => {
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
     }
-  } catch {}
-  try {
-    const raw = window.localStorage.getItem("meow-chat");
-    if (raw) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) return parsed; }
-  } catch {}
-  return [];
+  };
+
+  const current = parseChat(await loadVal(CHAT_STORAGE_KEY));
+  if (current?.length) return current;
+
+  const legacy = parseChat(await loadVal(LEGACY_CHAT_STORAGE_KEY));
+  if (legacy?.length) {
+    saveChat(legacy);
+    return legacy;
+  }
+
+  return current || legacy || [];
 }
 async function saveChat(msgs) {
   // Only save user/assistant messages, skip system research messages, cap at 50
   const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-50);
   const json = JSON.stringify(toSave);
   // Save to BOTH storage backends for redundancy
-  try { if (window.storage?.set) await window.storage.set("meow-chat", json); } catch {}
-  try { window.localStorage.setItem("meow-chat", json); } catch {}
+  try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
+  try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
 async function loadApiKey() {
   try {
@@ -636,20 +669,20 @@ async function fetchPageText(url) {
 // ─── iframe control script (injected into fetched pages) ───
 // Written in ES5 so serialization via .toString() works predictably
 function _iframeCtrl() {
-  if (window.__meowCtrlLoaded) return;
-  window.__meowCtrlLoaded = true;
+  if (window.__autoCtrlLoaded) return;
+  window.__autoCtrlLoaded = true;
 
   function reply(e, id, payload) {
-    try { e.source.postMessage({ meowBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
+    try { e.source.postMessage({ autoBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
   }
   // Also support replying to parent (for direct mode injection)
   function replyParent(id, payload) {
-    try { window.parent.postMessage({ meowBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
+    try { window.parent.postMessage({ autoBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
   }
 
   window.addEventListener("message", function(e) {
     var d = e.data;
-    if (!d || !d.meowBrowserCmd) return;
+    if (!d || !d.autoBrowserCmd) return;
     var id = d.id;
     var sendReply = function(payload) {
       try { reply(e, id, payload); } catch(ex) {}
@@ -824,10 +857,10 @@ function _iframeCtrl() {
     var href = el.href || "";
     if (!/^https?:\/\//i.test(href)) return;
     // Allow target=_blank to work normally in direct mode
-    if (el.target === "_blank" && window.__meowDirectMode) return;
+    if (el.target === "_blank" && window.__autoDirectMode) return;
     ev.preventDefault();
     ev.stopPropagation();
-    try { window.parent.postMessage({ meowBrowser: true, type: "iframeNavigate", url: href }, "*"); } catch(ex) {}
+    try { window.parent.postMessage({ autoBrowser: true, type: "iframeNavigate", url: href }, "*"); } catch(ex) {}
   }, true);
 
   // Intercept form submissions
@@ -848,7 +881,7 @@ function _iframeCtrl() {
     }
     var qs = params.toString();
     var url = action + (qs ? (action.indexOf("?") >= 0 ? "&" : "?") + qs : "");
-    try { window.parent.postMessage({ meowBrowser: true, type: "iframeNavigate", url: url }, "*"); } catch(ex) {}
+    try { window.parent.postMessage({ autoBrowser: true, type: "iframeNavigate", url: url }, "*"); } catch(ex) {}
   }, true);
 }
 
@@ -934,7 +967,7 @@ function _popupScript(cfg) {
   }
 
   function getWelcomeHtml() {
-    return "<!DOCTYPE html><html><body style='background:#07070b;color:#555;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'><div style='text-align:center'><div style='font-size:40px;margin-bottom:12px;opacity:0.3'>\uD83D\uDC31</div><div style='font-size:13px;color:#444'>Meow Browser</div><div style='font-size:11px;color:#333;margin-top:6px'>Navigate to a URL or let the AI browse for you</div></div></body></html>";
+    return "<!DOCTYPE html><html><body style='background:#07070b;color:#555;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'><div style='text-align:center'><div style='font-size:40px;margin-bottom:12px;opacity:0.3'>\uD83D\uDC31</div><div style='font-size:13px;color:#444'>Auto Browser</div><div style='font-size:11px;color:#333;margin-top:6px'>Navigate to a URL or let the AI browse for you</div></div></body></html>";
   }
 
   function renderTabs() {
@@ -1048,7 +1081,7 @@ function _popupScript(cfg) {
   }
 
   function notifyParent(type, payload) {
-    try { var target = window.parent !== window ? window.parent : window.opener; if (target) target.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
+    try { var target = window.parent !== window ? window.parent : window.opener; if (target) target.postMessage({ autoBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
   // ─── Blob URL loading — enables JavaScript execution in proxy-fetched pages ───
@@ -1109,7 +1142,7 @@ function _popupScript(cfg) {
         } else {
           updateUrl(url);
           addToHistory(url);
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, url: url, error: "Direct load timed out" } });
+          if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, url: url, error: "Direct load timed out" } });
         }
       }, 15000);
 
@@ -1160,7 +1193,7 @@ function _popupScript(cfg) {
 
         tryInjectCtrlDirect();
         addLog("Loaded (direct): " + url.slice(0, 55), "ok");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
+        if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
       }
 
       iframe.onload = onDirectLoadDone;
@@ -1210,7 +1243,7 @@ function _popupScript(cfg) {
           iframe.onload = null;
           hideLoading();
           addLog("Timeout \u2014 page rendering stalled", "err");
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page render timeout" } });
+          if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page render timeout" } });
         }, 18000);
         iframe.onload = function() {
           clearTimeout(ltid);
@@ -1222,7 +1255,7 @@ function _popupScript(cfg) {
             if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
           } catch(e) {}
           addLog("Loaded: " + url.slice(0, 55), "ok");
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
+          if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
         };
         // Use blob URL instead of srcdoc — this enables JavaScript execution
         // because blob URLs get the parent's origin (not null like srcdoc)
@@ -1294,7 +1327,7 @@ function _popupScript(cfg) {
       updateUrl(url);
       addToHistory(url);
       addLog("Loaded archived version: " + url.slice(0, 50), "ok");
-      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, archived: true } });
+      if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, archived: true } });
     };
     iframe.removeAttribute("srcdoc");
     iframe.src = archiveUrl;
@@ -1370,7 +1403,7 @@ function _popupScript(cfg) {
           // Use blob URL for Jina HTML too — enables JavaScript execution
           loadHtmlAsBlobUrl(processedHtml, activeTabId);
           addLog("Loaded real HTML via Jina Reader: " + url.slice(0, 50), "ok");
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true, htmlMode: true } });
+          if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true, htmlMode: true } });
         });
       })
       .catch(function(e) {
@@ -1444,7 +1477,7 @@ function _popupScript(cfg) {
         iframe.removeAttribute("src");
         iframe.srcdoc = readerHtml;
         addLog("Loaded via Jina Reader (markdown): " + url.slice(0, 50), "ok");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true } });
+        if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true } });
       }
 
       function onMarkdownFail() {
@@ -1503,7 +1536,7 @@ function _popupScript(cfg) {
       getActiveTab().title = "Cache: " + getDomain(url);
       renderTabs();
       addLog("Loaded via Google Cache: " + url.slice(0, 50), "ok");
-      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
+      if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
     };
     iframe.onerror = function() {
       if (settled) return;
@@ -1523,7 +1556,7 @@ function _popupScript(cfg) {
           getActiveTab().title = "Cache: " + getDomain(url);
           renderTabs();
           addLog("Loaded via Google Cache (proxy): " + url.slice(0, 50), "ok");
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
+          if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
         } else {
           showErrorPage(url, "All loading methods failed (proxy, direct, Jina Reader, Google Cache)", replyId);
         }
@@ -1643,15 +1676,15 @@ function _popupScript(cfg) {
       + "<p style='color:#888;margin-top:8px;font-size:11px'>" + esc(diagnosis) + "</p>"
       + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Jina Reader (HTML) → Jina Reader (text) → Google Cache</p>"
       + "<div style='margin-top:16px;display:flex;gap:8px;flex-wrap:wrap'>"
-      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryJinaReader',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(200,160,255,0.12);border:1px solid rgba(200,160,255,0.3);border-radius:5px;color:#c8a0ff;cursor:pointer;font-size:11px;font-family:monospace'>Try Jina Reader</button>"
-      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryArchive',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(136,187,204,0.15);border:1px solid rgba(136,187,204,0.3);border-radius:5px;color:#88bbcc;cursor:pointer;font-size:11px;font-family:monospace'>Try Archived Version</button>"
-      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryGoogleCache',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(255,200,100,0.1);border:1px solid rgba(255,200,100,0.3);border-radius:5px;color:#ddb050;cursor:pointer;font-size:11px;font-family:monospace'>Try Google Cache</button>"
-      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryDirect',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(124,224,138,0.1);border:1px solid rgba(124,224,138,0.3);border-radius:5px;color:#7ce08a;cursor:pointer;font-size:11px;font-family:monospace'>Retry Direct Mode</button>"
+      + "<button onclick=\"window.parent.postMessage({autoBrowserAction:'tryJinaReader',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(200,160,255,0.12);border:1px solid rgba(200,160,255,0.3);border-radius:5px;color:#c8a0ff;cursor:pointer;font-size:11px;font-family:monospace'>Try Jina Reader</button>"
+      + "<button onclick=\"window.parent.postMessage({autoBrowserAction:'tryArchive',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(136,187,204,0.15);border:1px solid rgba(136,187,204,0.3);border-radius:5px;color:#88bbcc;cursor:pointer;font-size:11px;font-family:monospace'>Try Archived Version</button>"
+      + "<button onclick=\"window.parent.postMessage({autoBrowserAction:'tryGoogleCache',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(255,200,100,0.1);border:1px solid rgba(255,200,100,0.3);border-radius:5px;color:#ddb050;cursor:pointer;font-size:11px;font-family:monospace'>Try Google Cache</button>"
+      + "<button onclick=\"window.parent.postMessage({autoBrowserAction:'tryDirect',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(124,224,138,0.1);border:1px solid rgba(124,224,138,0.3);border-radius:5px;color:#7ce08a;cursor:pointer;font-size:11px;font-family:monospace'>Retry Direct Mode</button>"
       + "</div>"
       + "</body></html>";
     iframe.onload = null;
     iframe.srcdoc = errHtml;
-    if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg, diagnosis: diagnosis } });
+    if (replyId != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg, diagnosis: diagnosis } });
   }
 
   // ─── Comprehensive HTML rewriting for proxy mode ───
@@ -1808,7 +1841,7 @@ function _popupScript(cfg) {
       }
 
       // Inject helper styles — minimal, don't override site styles
-      var helperStyle = '<style data-meow-helper>'
+      var helperStyle = '<style data-auto-helper>'
         + 'img[src=""],img:not([src]){display:none!important}'
         + 'img:not([width]):not([style*="width"]){max-width:100%;height:auto}'
         + '</style>';
@@ -2004,7 +2037,7 @@ function _popupScript(cfg) {
 
       // Proxy font URLs in any remaining inline <style> blocks (not from inlined links)
       html = html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, function(m, attrs, content) {
-        if (attrs.indexOf("data-meow-helper") >= 0) return m; // Skip our helper styles
+        if (attrs.indexOf("data-auto-helper") >= 0) return m; // Skip our helper styles
         var proxied = proxyCssResourceUrls(content);
         if (proxied !== content) return '<style' + attrs + '>' + proxied + '</style>';
         return m;
@@ -2202,7 +2235,7 @@ function _popupScript(cfg) {
       // Proxy fonts in dynamically injected <style> blocks (CSS-in-JS, styled-components, etc.)
       + "var stags=n.tagName==='STYLE'?[n]:(n.querySelectorAll?n.querySelectorAll('style'):[]);"
       + "[].forEach.call(stags,function(st){"
-      + "if(st.getAttribute('data-proxy-patched')||st.getAttribute('data-meow-helper'))return;"
+      + "if(st.getAttribute('data-proxy-patched')||st.getAttribute('data-auto-helper'))return;"
       + "st.setAttribute('data-proxy-patched','1');"
       + "var txt=st.textContent||'';"
       + "if(/@font-face/.test(txt)){"
@@ -2256,7 +2289,7 @@ function _popupScript(cfg) {
       + "var inlineStyles=document.querySelectorAll('style');"
       + "for(var j=0;j<inlineStyles.length;j++){"
       + "var st=inlineStyles[j];"
-      + "if(st.getAttribute('data-meow-helper')||st.getAttribute('data-proxy-patched'))continue;"
+      + "if(st.getAttribute('data-auto-helper')||st.getAttribute('data-proxy-patched'))continue;"
       + "st.setAttribute('data-proxy-patched','1');"
       + "var txt=st.textContent||'';"
       + "if(/@font-face/.test(txt)){"
@@ -2287,9 +2320,9 @@ function _popupScript(cfg) {
     try {
       var doc = iframe.contentDocument;
       if (!doc || !doc.body) return;
-      if (doc.querySelector("script[data-meow-ctrl]")) return;
+      if (doc.querySelector("script[data-auto-ctrl]")) return;
       var s = doc.createElement("script");
-      s.setAttribute("data-meow-ctrl", "1");
+      s.setAttribute("data-auto-ctrl", "1");
       s.textContent = IFRAME_CTRL;
       doc.body.appendChild(s);
       addLog("Injected AI read support into direct page", "ok");
@@ -2378,25 +2411,25 @@ function _popupScript(cfg) {
   function onMessage(e) {
     var d = e.data;
     // Handle error page action buttons
-    if (d && d.meowBrowserAction === "tryJinaReader" && d.url) {
+    if (d && d.autoBrowserAction === "tryJinaReader" && d.url) {
       tryJinaReaderFallback(d.url, null);
       return;
     }
-    if (d && d.meowBrowserAction === "tryArchive" && d.url) {
+    if (d && d.autoBrowserAction === "tryArchive" && d.url) {
       tryArchiveFallback(d.url, null);
       return;
     }
-    if (d && d.meowBrowserAction === "tryGoogleCache" && d.url) {
+    if (d && d.autoBrowserAction === "tryGoogleCache" && d.url) {
       tryGoogleCacheFallback(d.url, null);
       return;
     }
-    if (d && d.meowBrowserAction === "tryDirect" && d.url) {
+    if (d && d.autoBrowserAction === "tryDirect" && d.url) {
       var tab = getActiveTab();
       if (tab) { tab.directMode = true; updateDirectBtn(); }
       navigateTo(d.url, null);
       return;
     }
-    if (!d || !d.meowBrowser) return;
+    if (!d || !d.autoBrowser) return;
     // Forward iframe replies to parent
     if (d.type === "cmdReply") {
       notifyParent_raw(d);
@@ -2419,32 +2452,32 @@ function _popupScript(cfg) {
     if (d.cmd === "newTab") {
       var newTab = createTab(data.url || "");
       if (data.url) navigateTo(data.url, id);
-      else if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: newTab.id } });
+      else if (id != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: newTab.id } });
       return;
     }
     if (d.cmd === "closeTab") {
       closeTab(data.tabId || activeTabId);
-      if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true } });
+      if (id != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { success: true } });
       return;
     }
     if (d.cmd === "switchTab") {
       if (data.tabId) switchTab(data.tabId);
-      if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: activeTabId } });
+      if (id != null) notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: activeTabId } });
       return;
     }
     if (d.cmd === "getTabs") {
-      notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { tabs: getTabsSummary() } });
+      notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { tabs: getTabsSummary() } });
       return;
     }
     if (d.cmd === "navigate") { navigateTo(data.url, id, data.tabId); }
     else if (d.cmd === "click") {
-      if (!agentMode) { notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
+      if (!agentMode) { notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
       addLog("Click: " + (data.selector || "").slice(0, 40));
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "click", id: id, selector: data.selector }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "click", id: id, selector: data.selector }, "*");
     } else if (d.cmd === "type") {
-      if (!agentMode) { notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
+      if (!agentMode) { notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
       addLog("Type \u201c" + (data.text || "").slice(0, 30) + "\u201d \u2192 " + (data.selector || "").slice(0, 30));
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "type", id: id, selector: data.selector, text: data.text }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "type", id: id, selector: data.selector, text: data.text }, "*");
     } else if (d.cmd === "read") {
       addLog("Reading page content...");
       // In direct mode, try to read via injected script; if that fails, return what we know
@@ -2454,26 +2487,26 @@ function _popupScript(cfg) {
         tryInjectCtrlDirect();
         // Send read command - it will work if injection succeeded
         if (iframe.contentWindow) {
-          iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "read", id: id }, "*");
+          iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "read", id: id }, "*");
           // Set a timeout fallback in case the message isn't received (cross-origin)
           setTimeout(function() {
             // Check if we already got a reply (resolver was deleted)
             // We can't check from popup, but parent will timeout if no reply
           }, 3000);
         } else {
-          notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { text: "(Could not access page content)", title: tab.url, url: tab.url, directMode: true } });
+          notifyParent_raw({ autoBrowser: true, type: "cmdReply", id: id, payload: { text: "(Could not access page content)", title: tab.url, url: tab.url, directMode: true } });
         }
       } else {
-        iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "read", id: id }, "*");
+        iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "read", id: id }, "*");
       }
     } else if (d.cmd === "scroll") {
       if (!agentMode) return;
       addLog("Scroll: " + data.direction);
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "scroll", id: id, direction: data.direction, amount: data.amount || 400 }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "scroll", id: id, direction: data.direction, amount: data.amount || 400 }, "*");
     } else if (d.cmd === "find") {
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "find", id: id, query: data.query }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "find", id: id, query: data.query }, "*");
     } else if (d.cmd === "screenshot") {
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "screenshot", id: id }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ autoBrowserCmd: true, cmd: "screenshot", id: id }, "*");
     } else if (d.cmd === "logMsg") {
       addLog(data.msg, data.type || "");
     }
@@ -2566,7 +2599,7 @@ function buildPopupHtml() {
     '<div id="sb"><span id="st">Ready</span><span id="sm">AI MODE</span></div>'
   ].join("\n");
 
-  return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Meow Browser</title><style>" + css + "</style></head><body>" + body + "<script>" + popupScriptSrc + "<\/script></body></html>";
+  return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Auto Browser</title><style>" + css + "</style></head><body>" + body + "<script>" + popupScriptSrc + "<\/script></body></html>";
 }
 
 // ─── Agent Browser Manager (embedded iframe mode) ───
@@ -2588,7 +2621,7 @@ var agentBrowser = (function() {
     listenerAdded = true;
     window.addEventListener("message", function(e) {
       var d = e.data;
-      if (!d || !d.meowBrowser) return;
+      if (!d || !d.autoBrowser) return;
       if (d.type === "cmdReply") {
         var res = pendingResolvers[d.id];
         if (res) { delete pendingResolvers[d.id]; res(d.payload); }
@@ -2632,7 +2665,7 @@ var agentBrowser = (function() {
     if (!isOpen()) return Promise.resolve(null);
     var id = ++msgId;
     try {
-      embeddedIframe.contentWindow.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
+      embeddedIframe.contentWindow.postMessage({ autoBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
     } catch (e) {
       return Promise.resolve(null);
     }
@@ -2801,7 +2834,7 @@ function il(t) {
 // ═══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════
-function Meow() {
+function Auto() {
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2824,7 +2857,7 @@ function Meow() {
   const [expression, setExpression] = useState("happy"); // "happy" | "serious" | "veryHappy"
   const [isBlinking, setIsBlinking] = useState(false);
   const blinkRef = useRef(null);
-  const [terminalHistory, setTerminalHistory] = useState([{ type: "system", text: "Meow Terminal v1.0 — JavaScript execution environment\nType JavaScript code and press Enter to execute.\nUse clear() to clear the terminal.\n" }]);
+  const [terminalHistory, setTerminalHistory] = useState([{ type: "system", text: "Auto Terminal v1.0 — JavaScript execution environment\nType JavaScript code and press Enter to execute.\nUse clear() to clear the terminal.\n" }]);
   const [terminalInput, setTerminalInput] = useState("");
   const [terminalCmdHistory, setTerminalCmdHistory] = useState([]);
   const [terminalHistoryIdx, setTerminalHistoryIdx] = useState(-1);
@@ -2910,7 +2943,7 @@ function Meow() {
 
   // Load on mount
   useEffect(() => {
-    loadVal("meow-memory").then(v => { setMem(v || ""); setMemDraft(v || ""); });
+    loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
     (async () => {
       const envGroqKey = readEnvGroqKey();
@@ -2956,7 +2989,7 @@ function Meow() {
     // Save state to storage (called on interval, visibility change, beforeunload)
     const persistState = () => {
       try { if (msgsRef.current.length > 0) saveChat(msgsRef.current); } catch {}
-      try { if (memRef.current) saveVal("meow-memory", memRef.current); } catch {}
+      try { if (memRef.current) saveVal(MEMORY_STORAGE_KEY, memRef.current); } catch {}
     };
 
     // Auto-save every 15 seconds
@@ -3015,13 +3048,13 @@ function Meow() {
   // ─── Memory helpers ───
   const saveMem = useCallback(() => {
     setMem(memDraft);
-    saveVal("meow-memory", memDraft);
+    saveVal(MEMORY_STORAGE_KEY, memDraft);
   }, [memDraft]);
 
   const downloadMem = () => {
     const blob = new Blob([memDraft], { type: "text/plain" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = "meow-memory.txt"; a.click();
+    a.download = "auto-memory.txt"; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
 
@@ -3030,7 +3063,7 @@ function Meow() {
     inp.onchange = (e) => {
       const f = e.target.files?.[0]; if (!f) return;
       const r = new FileReader();
-      r.onload = () => { const t = r.result; setMemDraft(t); setMem(t); saveVal("meow-memory", t); };
+      r.onload = () => { const t = r.result; setMemDraft(t); setMem(t); saveVal(MEMORY_STORAGE_KEY, t); };
       r.readAsText(f);
     }; inp.click();
   };
@@ -3108,7 +3141,7 @@ function Meow() {
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    let s = `You are Meow, a brutally honest, exceptionally loyal, warm AI assistant with internet research capabilities. You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.`;
+    let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant with internet research capabilities. You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.`;
 
     // Memory instructions
     if (mem.trim()) {
@@ -3432,7 +3465,7 @@ ${buildSkillsSummary()}
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${key}`,
                 "HTTP-Referer": window.location.origin,
-                "X-Title": "Meow Agent",
+                "X-Title": "Auto",
               },
               body: JSON.stringify(buildBody(model)),
               signal: abortRef.current?.signal,
@@ -3566,7 +3599,7 @@ ${buildSkillsSummary()}
         if (actions.memoryUpdate) {
           setMem(actions.memoryUpdate);
           setMemDraft(actions.memoryUpdate);
-          saveVal("meow-memory", actions.memoryUpdate);
+          saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
           // Add a visible memory update note in chat
           const memNote = { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*` };
           if (text) {
@@ -3577,11 +3610,11 @@ ${buildSkillsSummary()}
           // Auto-save a basic memory snapshot even if the AI didn't include <memory_update>
           // This ensures every conversation is captured
           const autoMemory = mem.trim()
-            ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Meow responded about: ${text.slice(0, 200)}`
-            : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Meow responded about: ${text.slice(0, 200)}`;
+            ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
+            : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
           setMem(autoMemory);
           setMemDraft(autoMemory);
-          saveVal("meow-memory", autoMemory);
+          saveVal(MEMORY_STORAGE_KEY, autoMemory);
         }
 
         setMsgs([...currentMsgs]);
@@ -3855,7 +3888,7 @@ ${buildSkillsSummary()}
     return "./Expressions/Happy.png";
   }, [isBlinking, busy, expression]);
 
-  const clearChat = () => { setMsgs([]); saveChat([]); setSearchResults([]); setErr(null); };
+  const clearChat = () => { setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setSearchResults([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ═══ RENDER ═══
@@ -4012,14 +4045,14 @@ ${buildSkillsSummary()}
               <textarea
                 value={memDraft}
                 onChange={e => setMemDraft(e.target.value)}
-                placeholder="Meow's persistent memory (memory.txt)...\nTell Meow to remember things, or type here directly.\nMemory is saved to file and shown in chat when updated."
+                placeholder="Auto's persistent memory (memory.txt)...\nTell Auto to remember things, or type here directly.\nMemory is saved to file and shown in chat when updated."
                 style={{ flex: 1, padding: "10px 12px", background: "transparent", border: "none", color: "var(--tx)", fontSize: "12px", fontFamily: "var(--m)", resize: "none", outline: "none", lineHeight: 1.6 }}
               />
               <div style={{ padding: "8px 10px", borderTop: "1px solid var(--bd)", display: "flex", gap: "4px", flexWrap: "wrap" }}>
                 <button onClick={saveMem} style={btn("#7ce08a")}>Save</button>
                 <button onClick={downloadMem} style={btn("#88bbcc")}>Download .txt</button>
                 <button onClick={uploadMem} style={btn("#88bbcc")}>Upload</button>
-                <button onClick={() => { setMemDraft(""); setMem(""); saveVal("meow-memory", ""); }} style={btn("#cc7777")}>Clear</button>
+                <button onClick={() => { setMemDraft(""); setMem(""); saveVal(MEMORY_STORAGE_KEY, ""); clearVal(LEGACY_MEMORY_STORAGE_KEY); }} style={btn("#cc7777")}>Clear</button>
               </div>
               <div style={{ padding: "6px 12px 8px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
                 {mem.length} chars · ~{Math.ceil(mem.length / 3.8)} tokens · Saved to memory.txt
@@ -4117,11 +4150,11 @@ ${buildSkillsSummary()}
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <img
               src="./Expressions/Happy.png"
-              alt="Meow"
+              alt="Auto"
               style={{ width: "32px", height: "32px", borderRadius: "7px", objectFit: "cover", imageRendering: "pixelated" }}
               onError={(e) => { e.target.style.display = "none"; }}
             />
-            <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
+            <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
             <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq (qwen3-32b) · OpenRouter fallback</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
@@ -4157,8 +4190,8 @@ ${buildSkillsSummary()}
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
-                <img src="./Expressions/Happy.png" alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
-                <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
+                <img src="./Expressions/Happy.png" alt="Auto" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                <div style={{ fontWeight: 700, fontSize: "16px" }}>Auto</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "500px", lineHeight: 1.6 }}>
                   AI agent with persistent memory, web search, and a visual browser it can control.<br/>
                   Ask it to browse, click, fill forms — or open the sidebar to control the browser yourself.
@@ -4253,12 +4286,12 @@ ${buildSkillsSummary()}
             </div>
           </div>
 
-          {/* ═══ MEOW EXPRESSION DISPLAY ═══ */}
+          {/* ═══ AUTO EXPRESSION DISPLAY ═══ */}
           {/* Keep background/border hidden so the expression floats above the input */}
           <div style={{ padding: "6px 14px 2px", borderTop: "none", background: "transparent" }}>
             <img
               src={getExprImg(busy)}
-              alt="Meow"
+              alt="Auto"
               style={{
                 width: "160px", height: "160px", imageRendering: "pixelated",
               }}
@@ -4415,7 +4448,7 @@ ${buildSkillsSummary()}
                     handleAttachFiles({ target: { files } });
                   }
                 }}
-                placeholder={attachments.length > 0 ? "Add a message about your files... (optional)" : "Type a message... (Meow can search the web for you!)"}
+                placeholder={attachments.length > 0 ? "Add a message about your files... (optional)" : "Type a message... (Auto can search the web for you!)"}
                 style={{ flex: 1, minHeight: "44px", maxHeight: "180px", resize: "vertical", borderRadius: "8px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)", color: "var(--tx)", padding: "10px 12px", fontFamily: "var(--f)", fontSize: "13px", outline: "none" }}
               />
             </div>
@@ -4470,7 +4503,7 @@ class ErrorBoundary extends React.Component {
     return { hasError: true, error };
   }
   componentDidCatch(error, info) {
-    console.error("Meow crashed:", error, info);
+    console.error("Auto crashed:", error, info);
     // Auto-recover from transient render errors (retry up to 3 times)
     if (this.state.retryCount < 3) {
       setTimeout(() => {
@@ -4484,7 +4517,7 @@ class ErrorBoundary extends React.Component {
         style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
       },
         React.createElement("div", { style: { fontSize: "40px" } }, "\uD83D\uDE3F"),
-        React.createElement("h2", { style: { color: "#e88", margin: 0 } }, "Meow encountered an error"),
+        React.createElement("h2", { style: { color: "#e88", margin: 0 } }, "Auto encountered an error"),
         React.createElement("pre", { style: { color: "#888", fontSize: "12px", maxWidth: "600px", overflow: "auto", padding: "12px", background: "#0a0a12", borderRadius: "8px", border: "1px solid #181824" } },
           String(this.state.error)
         ),
@@ -4497,8 +4530,14 @@ class ErrorBoundary extends React.Component {
         }, "Try to Recover (keep chat)"),
         React.createElement("button", {
           onClick: () => {
-            try { window.storage && window.storage.set("meow-chat", "[]"); } catch(e) {}
-            try { window.localStorage.setItem("meow-chat", "[]"); } catch(e) {}
+            try {
+              window.storage && window.storage.set(CHAT_STORAGE_KEY, "[]");
+              window.storage && window.storage.set(LEGACY_CHAT_STORAGE_KEY, "[]");
+            } catch(e) {}
+            try {
+              window.localStorage.setItem(CHAT_STORAGE_KEY, "[]");
+              window.localStorage.setItem(LEGACY_CHAT_STORAGE_KEY, "[]");
+            } catch(e) {}
             this.setState({ hasError: false, error: null, retryCount: 0 });
           },
           style: { padding: "8px 20px", background: "rgba(124,224,138,0.1)", border: "1px solid rgba(124,224,138,0.3)", borderRadius: "6px", color: "#7ce08a", cursor: "pointer", fontSize: "13px" }
@@ -4514,5 +4553,5 @@ class ErrorBoundary extends React.Component {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  React.createElement(ErrorBoundary, null, React.createElement(Meow))
+  React.createElement(ErrorBoundary, null, React.createElement(Auto))
 );
