@@ -11,8 +11,13 @@ window.addEventListener("error", (event) => {
   // Don't prevent default here — let the ErrorBoundary handle React errors
 });
 
-const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "qwen/qwen3-32b";
+// ─── WebLLM module cache (imported once, reused) ───
+let _webllmModule = null;
+async function getWebLLM() {
+  if (_webllmModule) return _webllmModule;
+  _webllmModule = await import("https://esm.run/@mlc-ai/web-llm");
+  return _webllmModule;
+}
 
 // ─── Local Model Config ───
 const LOCAL_MODEL_KEY = "auto-local-model-id";
@@ -119,32 +124,44 @@ async function saveChat(msgs) {
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
-async function loadGroqKey() {
-  try {
-    if (window.storage?.get) {
-      const r = await window.storage.get("groq-api-key");
-      if (r?.value) return String(r.value).trim();
-    }
-  } catch {}
-  try { return (window.localStorage.getItem("groq-api-key") || "").trim(); } catch { return ""; }
-}
-async function saveGroqKey(val) {
-  const n = (val || "").trim();
-  try { if (window.storage?.set) await window.storage.set("groq-api-key", n); } catch {}
-  try { window.localStorage.setItem("groq-api-key", n); } catch {}
-}
-function readEnvGroqKey() {
-  return (window.GROQ_API_KEY || window.__GROQ_API_KEY__ || window?.env?.GROQ_API_KEY || "").trim();
-}
+// ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
+async function extractPdfContent(arrayBuffer, fileName) {
+  if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pageCount = pdf.numPages;
+  let fullText = "";
+  const pageImages = [];
 
-// ─── Race multiple CORS proxies for a URL — returns first successful text ───
-// ─── Error parsing ───
-function parseErrorMessage(rawBody, status) {
-  let parsed;
-  try { parsed = JSON.parse(rawBody); } catch {}
-  const fromParsed = parsed?.error?.message || parsed?.message || parsed?.detail;
-  if (typeof fromParsed === "string" && fromParsed.trim()) return fromParsed.trim();
-  return (rawBody || "").trim() || `HTTP ${status}`;
+  for (let i = 1; i <= pageCount; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(" ").trim();
+
+    fullText += `\n\n=== [Page ${i}] ===\n`;
+
+    if (pageText.length > 30) {
+      // Enough text content — use extracted text
+      fullText += pageText;
+    } else {
+      // Scanned/handwritten page — render to image for AI to "see"
+      fullText += "(Scanned/handwritten page — see attached page image)";
+      try {
+        const scale = 1.5; // ~150 DPI
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext("2d");
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.7) });
+      } catch (e) {
+        console.warn(`Failed to render page ${i} as image:`, e);
+        fullText += "\n(Could not render page image)";
+      }
+    }
+  }
+
+  return { text: fullText.trim(), pageCount, pageImages };
 }
 
 // ─── Markdown Renderer ───
@@ -245,6 +262,113 @@ function il(t) {
   }
 }
 
+// ─── PDF Viewer Component ───
+function PdfViewer({ pdfData, onClose }) {
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [zoom, setZoom] = useState(1.0);
+  const canvasRef = useRef(null);
+  const pdfDocRef = useRef(null);
+  const [jumpPage, setJumpPage] = useState("");
+
+  useEffect(() => {
+    if (!pdfData || !window.pdfjsLib) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
+        if (cancelled) return;
+        pdfDocRef.current = pdf;
+        setTotalPages(pdf.numPages);
+        setCurrentPage(1);
+      } catch (e) {
+        console.error("PDF load error:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pdfData]);
+
+  useEffect(() => {
+    if (!pdfDocRef.current || !canvasRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const page = await pdfDocRef.current.getPage(currentPage);
+        if (cancelled) return;
+        const scale = zoom * 1.5;
+        const viewport = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+      } catch (e) {
+        console.error("Page render error:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentPage, zoom, totalPages]);
+
+  const goPage = (n) => { if (n >= 1 && n <= totalPages) setCurrentPage(n); };
+
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999,
+      background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column",
+      animation: "fadeIn .2s ease",
+    }}>
+      {/* Toolbar */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "8px 16px", background: "#0d0d18", borderBottom: "1px solid #181824",
+        flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "14px", fontWeight: 700, color: "#88bbcc" }}>PDF Viewer</span>
+          <span style={{ fontSize: "11px", color: "#4e4e62", fontFamily: "monospace" }}>
+            Page {currentPage} of {totalPages}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <button onClick={() => goPage(currentPage - 1)} disabled={currentPage <= 1}
+            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: currentPage <= 1 ? "#333" : "#7ce08a", cursor: currentPage <= 1 ? "default" : "pointer", fontFamily: "monospace" }}>
+            ← Prev
+          </button>
+          <input
+            value={jumpPage}
+            onChange={e => setJumpPage(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") { const n = parseInt(jumpPage); if (n >= 1 && n <= totalPages) { setCurrentPage(n); setJumpPage(""); } } }}
+            placeholder="#"
+            style={{ width: "40px", padding: "4px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#ccc", textAlign: "center", fontFamily: "monospace", outline: "none" }}
+          />
+          <button onClick={() => goPage(currentPage + 1)} disabled={currentPage >= totalPages}
+            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: currentPage >= totalPages ? "#333" : "#7ce08a", cursor: currentPage >= totalPages ? "default" : "pointer", fontFamily: "monospace" }}>
+            Next →
+          </button>
+          <div style={{ width: "1px", height: "20px", background: "#181824", margin: "0 4px" }} />
+          <button onClick={() => setZoom(z => Math.max(0.3, z - 0.2))}
+            style={{ padding: "4px 8px", fontSize: "12px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#88bbcc", cursor: "pointer" }}>−</button>
+          <span style={{ fontSize: "10px", color: "#4e4e62", fontFamily: "monospace", minWidth: "35px", textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
+          <button onClick={() => setZoom(z => Math.min(3, z + 0.2))}
+            style={{ padding: "4px 8px", fontSize: "12px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#88bbcc", cursor: "pointer" }}>+</button>
+          <button onClick={() => setZoom(1.0)}
+            style={{ padding: "4px 8px", fontSize: "10px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#4e4e62", cursor: "pointer", fontFamily: "monospace" }}>Fit</button>
+          <div style={{ width: "1px", height: "20px", background: "#181824", margin: "0 4px" }} />
+          <button onClick={onClose}
+            style={{ padding: "4px 12px", fontSize: "12px", borderRadius: "4px", border: "1px solid #cc777733", background: "#cc77770a", color: "#cc7777", cursor: "pointer", fontWeight: 600 }}>
+            Close ✕
+          </button>
+        </div>
+      </div>
+      {/* Canvas area */}
+      <div style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", padding: "20px" }}>
+        <canvas ref={canvasRef} style={{ borderRadius: "4px", boxShadow: "0 4px 30px rgba(0,0,0,0.6)" }} />
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════
@@ -257,7 +381,6 @@ function Auto() {
   const [memDraft, setMemDraft] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
-  const [groqApiKey, setGroqApiKey] = useState("");
   const [activityStatus, setActivityStatus] = useState("");
   const [expression, setExpression] = useState("happy"); // "happy" | "serious" | "veryHappy"
   const [isBlinking, setIsBlinking] = useState(false);
@@ -278,28 +401,15 @@ function Auto() {
   const [localModelProgress, setLocalModelProgress] = useState(0);
   const [localModelProgressText, setLocalModelProgressText] = useState("");
   const [useLocalModel, setUseLocalModel] = useState(false);
+  const [pdfDocs, setPdfDocs] = useState([]); // [{name, text, pageCount, pageImages, arrayBuffer}]
+  const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
+  const [pdfViewerIdx, setPdfViewerIdx] = useState(0); // which pdf to view
 
-  const promptForGroqKey = useCallback((reason = "Enter your Groq API key:") => {
-    const enteredKey = window.prompt(reason);
-    const normalizedKey = (enteredKey || "").trim();
-    if (!normalizedKey) return "";
-    setGroqApiKey(normalizedKey);
-    saveGroqKey(normalizedKey);
-    return normalizedKey;
-  }, []);
-
-  // Load on mount
+  // Load on mount — auto-load previously cached model
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
-    (async () => {
-      const envGroqKey = readEnvGroqKey();
-      if (envGroqKey) { setGroqApiKey(envGroqKey); return; }
-      const storedGroqKey = await loadGroqKey();
-      if (storedGroqKey) { setGroqApiKey(storedGroqKey); return; }
-      promptForGroqKey();
-    })();
-    // Check if a local model was previously downloaded
+    // Auto-load previously downloaded local model
     (async () => {
       const savedId = await loadVal(LOCAL_MODEL_KEY);
       if (savedId && LOCAL_MODELS.find(m => m.id === savedId)) {
@@ -307,7 +417,45 @@ function Auto() {
         setLocalModelStatus("cached");
       }
     })();
-  }, [promptForGroqKey]);
+  }, []);
+
+  // Auto-load model from cache when status transitions to "cached"
+  const autoLoadAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (localModelStatus === "cached" && !localEngineRef.current && !autoLoadAttemptedRef.current) {
+      autoLoadAttemptedRef.current = true;
+      (async () => {
+        if (!navigator.gpu) {
+          setLocalModelStatus("error");
+          setLocalModelProgressText("WebGPU not available. Use Chrome 113+ or Edge 113+.");
+          return;
+        }
+        setLocalModelStatus("loading");
+        setLocalModelProgress(0);
+        setLocalModelProgressText("Auto-loading model from cache...");
+        try {
+          const webllm = await getWebLLM();
+          const engine = await webllm.CreateMLCEngine(localModelId, {
+            initProgressCallback: (p) => {
+              setLocalModelProgress(Math.round((p.progress || 0) * 100));
+              setLocalModelProgressText(p.text || "");
+            },
+          });
+          localEngineRef.current = engine;
+          setLocalModelStatus("ready");
+          setUseLocalModel(true);
+        } catch (e) {
+          console.error("Auto-load from cache failed:", e);
+          setLocalModelStatus("cached");
+          setLocalModelProgressText("Auto-load failed — click Load to try again. " + e.message);
+        }
+      })();
+    }
+    // Reset the guard when model ID changes (user picked a different model)
+    if (localModelStatus === "idle" || localModelStatus === "downloading") {
+      autoLoadAttemptedRef.current = false;
+    }
+  }, [localModelStatus, localModelId]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -407,9 +555,9 @@ function Auto() {
     }
     setLocalModelStatus("downloading");
     setLocalModelProgress(0);
-    setLocalModelProgressText("Fetching WebLLM...");
+    setLocalModelProgressText("Fetching WebLLM engine...");
     try {
-      const webllm = await import("https://esm.run/@mlc-ai/web-llm");
+      const webllm = await getWebLLM();
       const engine = await webllm.CreateMLCEngine(localModelId, {
         initProgressCallback: (p) => {
           setLocalModelProgress(Math.round((p.progress || 0) * 100));
@@ -437,7 +585,7 @@ function Auto() {
     setLocalModelProgress(0);
     setLocalModelProgressText("Loading from cache...");
     try {
-      const webllm = await import("https://esm.run/@mlc-ai/web-llm");
+      const webllm = await getWebLLM();
       const engine = await webllm.CreateMLCEngine(localModelId, {
         initProgressCallback: (p) => {
           setLocalModelProgress(Math.round((p.progress || 0) * 100));
@@ -446,6 +594,7 @@ function Auto() {
       });
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
+      setUseLocalModel(true);
     } catch (e) {
       console.error("Local model load failed:", e);
       setLocalModelStatus("error");
@@ -553,23 +702,44 @@ function Auto() {
     }
   }, [localModelId]);
 
-  // ─── Search handler ───
-  // ─── Attachment handling ───
+  // ─── Attachment handling (supports PDF, images, text) ───
   const handleAttachFiles = useCallback((e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    const MAX_FILE_SIZE = 512 * 1024; // 512KB per file
+    const MAX_FILE_SIZE_DEFAULT = 512 * 1024; // 512KB for text/images
+    const MAX_FILE_SIZE_PDF = 10 * 1024 * 1024; // 10MB for PDFs
     const MAX_ATTACHMENTS = 5;
 
     files.forEach(file => {
-      if (attachments.length >= MAX_ATTACHMENTS) return;
-      if (file.size > MAX_FILE_SIZE) {
-        setErr(`File "${file.name}" is too large (max 512KB). Skipped.`);
+      const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      const maxSize = isPdf ? MAX_FILE_SIZE_PDF : MAX_FILE_SIZE_DEFAULT;
+
+      if (file.size > maxSize) {
+        setErr(`File "${file.name}" is too large (max ${isPdf ? "10MB" : "512KB"}). Skipped.`);
         return;
       }
 
-      const reader = new FileReader();
-      if (file.type.startsWith("image/")) {
+      if (isPdf) {
+        // PDF: extract text page-by-page with page markers
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const arrayBuffer = reader.result;
+            const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name);
+            setAttachments(prev => {
+              if (prev.length >= MAX_ATTACHMENTS) return prev;
+              return [...prev, { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }];
+            });
+            // Store PDF data for viewer
+            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, arrayBuffer: arrayBuffer.slice(0) }]);
+          } catch (err) {
+            console.error("PDF extraction failed:", err);
+            setErr(`Failed to process PDF "${file.name}": ${err.message}`);
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      } else if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
@@ -578,6 +748,7 @@ function Auto() {
         };
         reader.readAsDataURL(file);
       } else {
+        const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
@@ -589,7 +760,7 @@ function Auto() {
     });
     if (attachInputRef.current) attachInputRef.current.value = "";
     setAttachMenuOpen(false);
-  }, [attachments]);
+  }, []); // No stale dependency on attachments — all checks use functional updates
 
   const removeAttachment = useCallback((index) => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
@@ -598,7 +769,51 @@ function Auto() {
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant. You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.`;
+    let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.
+
+## SMSF Document Expert
+
+Your PRIMARY function is to cross-reference uploaded documents and cite specific page numbers in EVERY response. You are an expert in Australian SMSF compliance, administration, and strategy.
+
+### Core SMSF Knowledge Areas:
+- Trust deeds & governing rules (SIS Act 1993, SIS Regulations 1994)
+- Investment strategy requirements (reg 4.09 SIS Regs) — diversification, liquidity, risk, insurance
+- Member benefit statements & accumulation/pension balances
+- ATO compliance & reporting (TBAR, event-based reporting, SuperStream)
+- APRA/ASIC regulatory frameworks & trustee obligations
+- Annual returns & financial statements (SMSF Annual Return - SAR)
+- Independent audit requirements (approved SMSF auditor, Part 12 SIS Act)
+- Contribution caps — concessional ($30k), non-concessional ($120k), bring-forward rule (3-year $360k)
+- Pension/retirement phase — minimum drawdown rates, account-based pensions, transition-to-retirement
+- In-house asset rules (5% market value limit, s71 SIS Act)
+- Related party transactions & arm's length requirements (s109 SIS Act)
+- Sole purpose test (s62 SIS Act)
+- LRBA (Limited Recourse Borrowing Arrangements, s67A SIS Act)
+- Death benefit nominations — binding (BDBN), non-binding, reversionary pensions
+- Rollover & transfer balance cap ($1.9M as of 2023-24)
+- CGT relief provisions, exempt current pension income (ECPI)
+- Anti-detriment payments & tax components (taxable/tax-free)
+
+### Document Cross-Referencing Rules (CRITICAL):
+- **ALWAYS** reference uploaded documents by filename and page number in your responses
+- Format citations as: **[Document Name, Page X]** — bold and specific
+- When answering ANY question, scan ALL uploaded documents FIRST for relevant content
+- Quote relevant sections with page citations before providing your analysis
+- If multiple documents are uploaded, CROSS-REFERENCE between them (e.g., compare trust deed with investment strategy)
+- If NO documents are uploaded, still provide SMSF expertise but explicitly note: "Upload your SMSF documents (trust deed, investment strategy, member statements, etc.) so I can provide specific page references."
+- For every claim, recommendation, or compliance point, try to back it up with a document reference
+- Identify discrepancies between documents (e.g., trust deed powers vs investment strategy allocations)
+- When referencing legislation, also check if the uploaded documents address that specific requirement
+- Summarise what each uploaded document contains and its relevance at the start of your analysis`;
+
+    // Include uploaded PDF document content for cross-referencing
+    if (pdfDocs.length > 0) {
+      s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number:\n`;
+      for (const doc of pdfDocs) {
+        s += `\n<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, 15000)}\n</document>\n`;
+      }
+      s += `</documents>`;
+    }
 
     // Memory instructions
     if (mem.trim()) {
@@ -634,7 +849,7 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
     return s;
-  }, [mem]);
+  }, [mem, pdfDocs]);
 
   // ─── Parse AI response (memory updates, expressions, terminal commands) ───
   const parseResponse = useCallback((text) => {
@@ -699,85 +914,60 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     }
   }, []);
 
-  // ─── Call AI API ───
-  const callAI = useCallback(async (apiMsgs, groqKey) => {
-    // Use local model if active and engine is loaded
-    if (useLocalModel && localEngineRef.current) {
-      try {
-        const resp = await localEngineRef.current.chat.completions.create({
-          messages: apiMsgs,
-          temperature: 0.7,
-          max_tokens: 2048,
-        });
-        const content = resp.choices?.[0]?.message?.content || "";
-        return {
-          data: {
-            choices: [{ message: { content } }],
-            usage: {
-              prompt_tokens: resp.usage?.prompt_tokens || 0,
-              completion_tokens: resp.usage?.completion_tokens || 0,
-            },
-          },
-          usedModel: localModelId,
-        };
-      } catch (e) {
-        if (e.name === "AbortError") throw e;
-        throw new Error(`Local model error: ${e.message}`);
-      }
+  // ─── Call AI (offline-only — local models only, no cloud) ───
+  const callAI = useCallback(async (apiMsgs) => {
+    // Validate engine is loaded
+    if (!localEngineRef.current) {
+      throw new Error("No model loaded. Please download and load a local model from the sidebar before sending messages.");
     }
 
-    const buildBody = (model) => ({ model, messages: apiMsgs });
-    let data = null;
-    let usedModel = GROQ_MODEL;
-    let lastErr = null;
-    const delay = ms => new Promise(r => setTimeout(r, ms));
-
-    if (groqKey) {
-      const GROQ_MAX_RETRIES = 4;
-      for (let attempt = 0; attempt < GROQ_MAX_RETRIES; attempt++) {
+    try {
+      const resp = await localEngineRef.current.chat.completions.create({
+        messages: apiMsgs,
+        temperature: 0.7,
+        max_tokens: 2048,
+      });
+      const content = resp.choices?.[0]?.message?.content || "";
+      return {
+        data: {
+          choices: [{ message: { content } }],
+          usage: {
+            prompt_tokens: resp.usage?.prompt_tokens || 0,
+            completion_tokens: resp.usage?.completion_tokens || 0,
+          },
+        },
+        usedModel: localModelId,
+      };
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      // Handle the specific "model not loaded" error — attempt reload
+      if (e.message && e.message.includes("not loaded")) {
         try {
-          const res = await fetch(GROQ_API, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${groqKey}`,
-            },
-            body: JSON.stringify(buildBody(GROQ_MODEL)),
-            signal: abortRef.current?.signal,
+          await localEngineRef.current.reload(localModelId);
+          // Retry once after reload
+          const resp = await localEngineRef.current.chat.completions.create({
+            messages: apiMsgs,
+            temperature: 0.7,
+            max_tokens: 2048,
           });
-
-          if (res.ok) {
-            data = await res.json();
-            usedModel = GROQ_MODEL;
-            lastErr = null;
-            break;
-          } else {
-            const rawBody = await res.text();
-            const msg = parseErrorMessage(rawBody, res.status);
-            lastErr = new Error(`Groq: ${msg}`);
-            // Retry on 429 (rate limit) with exponential backoff
-            if (res.status === 429 && attempt < GROQ_MAX_RETRIES - 1) {
-              await delay(1500 * (attempt + 1)); // 1.5s, 3s, 4.5s, 6s
-              continue;
-            }
-            break; // Non-retryable error
-          }
-        } catch (e) {
-          if (e.name === "AbortError") throw e;
-          lastErr = e;
-          // Retry on network errors
-          if (attempt < GROQ_MAX_RETRIES - 1) {
-            await delay(1000 * (attempt + 1));
-            continue;
-          }
-          break;
+          const content = resp.choices?.[0]?.message?.content || "";
+          return {
+            data: {
+              choices: [{ message: { content } }],
+              usage: {
+                prompt_tokens: resp.usage?.prompt_tokens || 0,
+                completion_tokens: resp.usage?.completion_tokens || 0,
+              },
+            },
+            usedModel: localModelId,
+          };
+        } catch (reloadErr) {
+          throw new Error(`Model reload failed. Please re-download the model from the sidebar. (${reloadErr.message})`);
         }
       }
+      throw new Error(`Local model error: ${e.message}`);
     }
-
-    if (!data) throw lastErr || new Error("Failed to get a completion.");
-    return { data, usedModel };
-  }, [useLocalModel, localModelId]);
+  }, [localModelId]);
 
   // ─── Main send function with research loop ───
   const send = useCallback(async () => {
@@ -808,13 +998,9 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     saveChat(currentMsgs);
 
     try {
-      let groqKey = "";
-      if (!useLocalModel || !localEngineRef.current) {
-        groqKey = (groqApiKey || readEnvGroqKey() || (await loadGroqKey()) || "").trim();
-        if (!groqKey) {
-          groqKey = promptForGroqKey("Missing API key. Enter your Groq API key:");
-          if (!groqKey) throw new Error("Missing API key.");
-        }
+      // Offline-only: require a loaded local model
+      if (!localEngineRef.current) {
+        throw new Error("No model loaded. Please download and load a local model from the Workspace sidebar first.");
       }
 
       abortRef.current = new AbortController();
@@ -846,7 +1032,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           await new Promise(r => setTimeout(r, 800));
         }
 
-        const { data, usedModel } = await callAI(apiMsgs, groqKey);
+        const { data, usedModel } = await callAI(apiMsgs);
         if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
         let rawContent = typeof data.choices?.[0]?.message?.content === "string"
@@ -901,7 +1087,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       setActivityStatus("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, groqApiKey, promptForGroqKey, attachments, useLocalModel]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, useLocalModel]);
 
   // ─── Expression image resolver — blink overrides all other states ───
   const getExprImg = useCallback((speakingOverride = false) => {
@@ -926,6 +1112,13 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
 
   return (
     <div style={{ ...S, height: "100vh", display: "flex", fontFamily: "var(--f)", color: "var(--tx)", background: "var(--bg)", overflow: "hidden", fontSize: "13.5px" }}>
+      {/* PDF Viewer Modal */}
+      {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
+        <PdfViewer
+          pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
+          onClose={() => setPdfViewerOpen(false)}
+        />
+      )}
       {/* ═══ LEFT SIDEBAR ═══ */}
       {sidebarOpen && (
         <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--bd)", background: "var(--sf)", overflow: "hidden", animation: "slideR .2s ease" }}>
@@ -960,6 +1153,31 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             </div>
           )}
 
+          {/* ─── Uploaded SMSF Documents ─── */}
+          {pdfDocs.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--bd)", flexShrink: 0, padding: "8px 10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
+                <span style={{ fontSize: "11px" }}>{"\uD83D\uDCDA"}</span>
+                <span style={{ fontWeight: 700, fontSize: "11px" }}>SMSF Documents</span>
+                <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded</span>
+              </div>
+              {pdfDocs.map((doc, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
+                  borderRadius: "5px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.1)",
+                  marginBottom: "4px", cursor: "pointer",
+                }} onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }}>
+                  <span style={{ fontSize: "10px" }}>{"\uD83D\uDCC4"}</span>
+                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)" }}>{doc.name}</span>
+                  <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount} pages</span>
+                </div>
+              ))}
+              <div style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", marginTop: "4px", lineHeight: 1.4 }}>
+                Click to view. AI will cross-reference these with page citations.
+              </div>
+            </div>
+          )}
+
           {/* ─── Local Model Section ─── */}
           <div style={{ borderTop: "1px solid var(--bd)", flexShrink: 0 }}>
             <div style={{ padding: "8px 12px 4px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -974,15 +1192,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                 )}
               </div>
               {localModelStatus === "ready" && (
-                <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer", userSelect: "none" }}>
-                  <input
-                    type="checkbox"
-                    checked={useLocalModel}
-                    onChange={e => setUseLocalModel(e.target.checked)}
-                    style={{ margin: 0, accentColor: "var(--ac)" }}
-                  />
-                  <span style={{ fontSize: "9px", color: useLocalModel ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>{useLocalModel ? "ACTIVE" : "OFF"}</span>
-                </label>
+                <span style={{ fontSize: "9px", color: "var(--ac)", fontFamily: "var(--m)" }}>OFFLINE ✓</span>
               )}
             </div>
 
@@ -994,14 +1204,34 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                 return (
                   <div
                     key={m.id}
-                    onClick={() => {
+                    onClick={async () => {
                       if (locked) return;
-                      setLocalModelId(m.id);
-                      setLocalModelStatus("idle");
-                      setLocalModelProgress(0);
-                      setLocalModelProgressText("");
+                      // Unload current engine
                       localEngineRef.current = null;
                       setUseLocalModel(false);
+                      setLocalModelId(m.id);
+                      setLocalModelProgress(0);
+                      setLocalModelProgressText("");
+                      // Check if this model is cached — auto-load or auto-download
+                      const cacheKeys = await caches.keys().catch(() => []);
+                      const baseId = m.id.replace(/-MLC$/, "");
+                      let isCached = false;
+                      for (const cn of cacheKeys) {
+                        const cache = await caches.open(cn);
+                        const reqs = await cache.keys();
+                        if (reqs.some(r => r.url.includes(m.id) || r.url.includes(baseId))) {
+                          isCached = true;
+                          break;
+                        }
+                      }
+                      if (isCached) {
+                        setLocalModelStatus("cached");
+                        // Auto-load will be triggered by the useEffect
+                      } else {
+                        setLocalModelStatus("idle");
+                        // Auto-download the selected model
+                        saveVal(LOCAL_MODEL_KEY, m.id);
+                      }
                     }}
                     style={{
                       border: `1px solid ${selected ? m.color + "55" : "var(--bd)"}`,
@@ -1089,7 +1319,8 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               )}
 
               <div style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", lineHeight: 1.5 }}>
-                Runs fully offline after download. Model cached in browser.
+                Runs fully offline after download. No cloud/internet used for AI.
+                Model cached in browser storage.
               </div>
             </div>
           </div>
@@ -1109,25 +1340,20 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               onError={(e) => { e.target.style.display = "none"; }}
             />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
-            <span style={{ fontSize: "10px", color: useLocalModel && localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
-              {useLocalModel && localModelStatus === "ready"
-                ? `Local (${LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId})`
-                : "Groq (qwen3-32b)"}
+            <span style={{ fontSize: "10px", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
+              {localModelStatus === "ready"
+                ? `Offline (${LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId})`
+                : localModelStatus === "downloading" || localModelStatus === "loading"
+                  ? "Loading model..."
+                  : "No model loaded"}
             </span>
+            <span style={{ fontSize: "9px", color: "#88bbcc", fontFamily: "var(--m)", opacity: 0.6 }}>SMSF</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
-            {useLocalModel && localModelStatus === "ready" ? (
-              <span style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: "var(--ac)", borderColor: "rgba(124,224,138,0.2)", display: "inline-block" }}
-                title="Using local offline model">LOCAL ✓</span>
-            ) : (
-              <button
-                onClick={() => promptForGroqKey("Set or update your Groq API key:")}
-                style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dg)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : "rgba(204,119,119,0.2)" }}
-                title={groqApiKey ? "Groq API key set" : "Groq API key missing"}
-              >
-                {groqApiKey ? "GROQ ✓" : "GROQ !"}
-              </button>
-            )}
+            <span style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", borderColor: localModelStatus === "ready" ? "rgba(124,224,138,0.2)" : "rgba(255,255,255,0.05)", display: "inline-block" }}
+              title={localModelStatus === "ready" ? "Running fully offline" : "Download a model to start"}>
+              {localModelStatus === "ready" ? "OFFLINE ✓" : "OFFLINE"}
+            </span>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -1149,8 +1375,9 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                 <img src="./Expressions/Happy.png" alt="Auto" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Auto</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "500px", lineHeight: 1.6 }}>
-                  AI assistant with persistent memory, attachments, and a built-in JavaScript terminal.<br/>
-                  Ask for help, save context in memory, or use the sidebar terminal for quick code experiments.
+                  SMSF document analysis assistant — runs fully offline.<br/>
+                  Upload PDF trust deeds, investment strategies, member statements, or any SMSF documents.<br/>
+                  Auto will cross-reference them with page-level citations.
                 </div>
               </div>
             )}
@@ -1207,13 +1434,25 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                   <div key={i} style={{
                     display: "flex", alignItems: "center", gap: "6px",
                     padding: "4px 8px", borderRadius: "6px",
-                    background: "rgba(124,224,138,0.06)", border: "1px solid rgba(124,224,138,0.15)",
-                    fontSize: "11px", fontFamily: "var(--m)", color: "var(--ac)",
-                    maxWidth: "200px", overflow: "hidden",
+                    background: att.isPdf ? "rgba(136,187,204,0.08)" : "rgba(124,224,138,0.06)",
+                    border: `1px solid ${att.isPdf ? "rgba(136,187,204,0.2)" : "rgba(124,224,138,0.15)"}`,
+                    fontSize: "11px", fontFamily: "var(--m)", color: att.isPdf ? "var(--ac2)" : "var(--ac)",
+                    maxWidth: "260px", overflow: "hidden",
                   }}>
-                    <span style={{ flexShrink: 0, fontSize: "12px" }}>{att.isImage ? "\uD83D\uDDBC" : "\uD83D\uDCC4"}</span>
+                    <span style={{ flexShrink: 0, fontSize: "12px" }}>{att.isPdf ? "\uD83D\uDCDA" : att.isImage ? "\uD83D\uDDBC" : "\uD83D\uDCC4"}</span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{att.name}</span>
-                    <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{(att.size / 1024).toFixed(0)}KB</span>
+                    {att.isPdf && <span style={{ fontSize: "8px", color: "var(--ac2)", flexShrink: 0 }}>{att.pageCount}pg</span>}
+                    <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{att.size >= 1024*1024 ? (att.size / (1024*1024)).toFixed(1)+"MB" : (att.size / 1024).toFixed(0)+"KB"}</span>
+                    {att.isPdf && (
+                      <button
+                        onClick={() => {
+                          const idx = pdfDocs.findIndex(d => d.name === att.name);
+                          if (idx >= 0) { setPdfViewerIdx(idx); setPdfViewerOpen(true); }
+                        }}
+                        style={{ background: "none", border: "1px solid rgba(136,187,204,0.3)", color: "var(--ac2)", cursor: "pointer", fontSize: "9px", padding: "1px 5px", borderRadius: "3px", flexShrink: 0, fontFamily: "var(--m)" }}
+                        title="View PDF"
+                      >View</button>
+                    )}
                     <button
                       onClick={() => removeAttachment(i)}
                       style={{ background: "none", border: "none", color: "var(--dg)", cursor: "pointer", fontSize: "13px", padding: "0 2px", lineHeight: 1, flexShrink: 0 }}
@@ -1251,6 +1490,29 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                     boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
                     animation: "fadeIn .15s ease",
                   }}>
+                    <button
+                      onClick={() => {
+                        const pdfInput = document.createElement("input");
+                        pdfInput.type = "file";
+                        pdfInput.accept = ".pdf,application/pdf";
+                        pdfInput.multiple = true;
+                        pdfInput.onchange = handleAttachFiles;
+                        pdfInput.click();
+                        setAttachMenuOpen(false);
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                        padding: "8px 10px", background: "transparent", border: "none",
+                        color: "var(--ac)", cursor: "pointer", borderRadius: "6px",
+                        fontSize: "12px", fontFamily: "var(--f)", textAlign: "left", fontWeight: 600,
+                      }}
+                      onMouseEnter={e => e.target.style.background = "rgba(124,224,138,0.06)"}
+                      onMouseLeave={e => e.target.style.background = "transparent"}
+                    >
+                      <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCDA"}</span>
+                      Upload SMSF Document (PDF)
+                    </button>
+                    <div style={{ height: "1px", background: "var(--bd)", margin: "4px 6px" }}></div>
                     <button
                       onClick={() => { attachInputRef.current?.click(); }}
                       style={{
@@ -1323,7 +1585,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                   ref={attachInputRef}
                   type="file"
                   multiple
-                  accept=".txt,.md,.json,.csv,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.c,.cpp,.h,.go,.rs,.rb,.php,.sql,.yaml,.yml,.toml,.ini,.cfg,.log,.sh,.bat,.ps1,.r,.m,.swift,.kt,.dart,.lua,.pl,.ex,.exs,.hs,.scala,.clj,.el,.vim,.dockerfile,.makefile,.env,.gitignore,.editorconfig,image/*"
+                  accept=".pdf,.txt,.md,.json,.csv,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.c,.cpp,.h,.go,.rs,.rb,.php,.sql,.yaml,.yml,.toml,.ini,.cfg,.log,.sh,.bat,.ps1,.r,.m,.swift,.kt,.dart,.lua,.pl,.ex,.exs,.hs,.scala,.clj,.el,.vim,.dockerfile,.makefile,.env,.gitignore,.editorconfig,image/*"
                   onChange={handleAttachFiles}
                   style={{ display: "none" }}
                 />
@@ -1347,7 +1609,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                     handleAttachFiles({ target: { files } });
                   }
                 }}
-                placeholder={attachments.length > 0 ? "Add a message about your files... (optional)" : "Type a message..."}
+                placeholder={attachments.length > 0 ? "Ask about your SMSF documents... (optional)" : "Ask about SMSF compliance, documents, or upload a PDF..."}
                 style={{ flex: 1, minHeight: "44px", maxHeight: "180px", resize: "vertical", borderRadius: "8px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)", color: "var(--tx)", padding: "10px 12px", fontFamily: "var(--f)", fontSize: "13px", outline: "none" }}
               />
             </div>
