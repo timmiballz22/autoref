@@ -135,25 +135,64 @@ async function extractPdfContent(arrayBuffer, fileName) {
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i);
     const textContent = await page.getTextContent();
-    const pageText = textContent.items.map(item => item.str).join(" ").trim();
+    // Spatial-aware text extraction: preserve layout using pdf.js transform coordinates
+    const sortedItems = [...textContent.items].filter(item => item.str.trim()).sort((a, b) => {
+      const yDiff = b.transform[5] - a.transform[5]; // PDF y-axis is bottom-up
+      if (Math.abs(yDiff) > 5) return yDiff; // Different lines (5pt threshold)
+      return a.transform[4] - b.transform[4]; // Same line, sort left-to-right
+    });
+
+    // Group items into lines based on y-position proximity
+    let lines = [];
+    let currentLine = [];
+    let lastY = null;
+    for (const item of sortedItems) {
+      const y = item.transform[5];
+      if (lastY !== null && Math.abs(lastY - y) > 5) {
+        lines.push(currentLine);
+        currentLine = [];
+      }
+      currentLine.push(item);
+      lastY = y;
+    }
+    if (currentLine.length > 0) lines.push(currentLine);
+
+    // Reconstruct text with spacing awareness (tabs for columns, spaces for words)
+    const pageText = lines.map(line => {
+      let lineText = "";
+      let lastX = null;
+      let lastWidth = 0;
+      for (const item of line) {
+        const x = item.transform[4];
+        if (lastX !== null) {
+          const gap = x - (lastX + lastWidth);
+          if (gap > 15) lineText += "\t"; // Tab for large gaps (columns/tables)
+          else if (gap > 3) lineText += " ";
+        }
+        lineText += item.str;
+        lastX = x;
+        lastWidth = item.width || (item.str.length * 5);
+      }
+      return lineText;
+    }).join("\n").trim();
 
     fullText += `\n\n=== [Page ${i}] ===\n`;
 
     if (pageText.length > 30) {
-      // Enough text content — use extracted text
+      // Enough text content — use extracted text with spatial layout preserved
       fullText += pageText;
     } else {
       // Scanned/handwritten page — render to image for AI to "see"
       fullText += "(Scanned/handwritten page — see attached page image)";
       try {
-        const scale = 1.5; // ~150 DPI
+        const scale = 3.0; // ~300 DPI for better quality rendering
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.7) });
+        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.95) });
       } catch (e) {
         console.warn(`Failed to render page ${i} as image:`, e);
         fullText += "\n(Could not render page image)";
@@ -741,18 +780,10 @@ function Auto() {
   const handleAttachFiles = useCallback((e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    const MAX_FILE_SIZE_DEFAULT = 512 * 1024; // 512KB for text/images
-    const MAX_FILE_SIZE_PDF = 10 * 1024 * 1024; // 10MB for PDFs
-    const MAX_ATTACHMENTS = 5;
+    const MAX_ATTACHMENTS = 20; // No file size limits — accept any size
 
     files.forEach(file => {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-      const maxSize = isPdf ? MAX_FILE_SIZE_PDF : MAX_FILE_SIZE_DEFAULT;
-
-      if (file.size > maxSize) {
-        setErr(`File "${file.name}" is too large (max ${isPdf ? "10MB" : "512KB"}). Skipped.`);
-        return;
-      }
 
       if (isPdf) {
         // PDF: extract text page-by-page with page markers
@@ -839,13 +870,39 @@ Your PRIMARY function is to cross-reference uploaded documents and cite specific
 - For every claim, recommendation, or compliance point, try to back it up with a document reference
 - Identify discrepancies between documents (e.g., trust deed powers vs investment strategy allocations)
 - When referencing legislation, also check if the uploaded documents address that specific requirement
-- Summarise what each uploaded document contains and its relevance at the start of your analysis`;
+- Summarise what each uploaded document contains and its relevance at the start of your analysis
+
+### Page Number Citation Rules (MANDATORY):
+- EVERY factual statement about a document MUST include a page citation: **[Document Name, Page X]**
+- When quoting text from a document, always include the page: *"quoted text"* **[Document Name, Page X]**
+- If information spans multiple pages, cite all: **[Document Name, Pages X-Y]**
+- At the end of your analysis, include a "References" section listing all cited pages per document
+- NEVER make a claim about document content without a page citation — this is your #1 rule
+- Page numbers are marked in the document text as === [Page X] === — use these to determine exact page numbers
+
+### Cross-Referencing Protocol:
+When multiple documents are uploaded, you MUST perform systematic cross-referencing:
+1. **Trust Deed vs Investment Strategy**: Check if investment powers in the deed match/permit the investment strategy allocations
+2. **Investment Strategy vs Member Statements**: Verify actual asset allocation against stated strategy targets
+3. **Financial Statements vs Member Balances**: Reconcile total fund assets with member accumulation/pension accounts
+4. **Minutes vs Actions**: Check if trustee minutes authorise the actions reflected in other documents
+5. **Compliance Checklist**: For each document, note any SIS Act requirements that appear unmet
+6. **Discrepancy Register**: Explicitly list ALL discrepancies found between documents in a dedicated section
+
+### Response Structure for Document Analysis:
+1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
+2. **Key Findings**: Major observations with page citations
+3. **Cross-Reference Analysis**: Comparisons between documents with specific page references from EACH document
+4. **Discrepancies & Concerns**: Explicitly called out with page references from each document
+5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
+6. **Recommendations**: Actionable next steps based on findings
+7. **References**: Complete list of all document pages cited`;
 
     // Include uploaded PDF document content for cross-referencing
     if (pdfDocs.length > 0) {
       s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number:\n`;
       for (const doc of pdfDocs) {
-        s += `\n<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, 15000)}\n</document>\n`;
+        s += `\n<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text}\n</document>\n`;
       }
       s += `</documents>`;
     }
@@ -960,7 +1017,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       const resp = await localEngineRef.current.chat.completions.create({
         messages: apiMsgs,
         temperature: 0.7,
-        max_tokens: 2048,
+        max_tokens: 32768,
       });
       const content = resp.choices?.[0]?.message?.content || "";
       return {
@@ -983,7 +1040,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           const resp = await localEngineRef.current.chat.completions.create({
             messages: apiMsgs,
             temperature: 0.7,
-            max_tokens: 2048,
+            max_tokens: 32768,
           });
           const content = resp.choices?.[0]?.message?.content || "";
           return {
@@ -1019,7 +1076,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         if (att.isImage) {
           attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
         } else {
-          const preview = (att.content || "").slice(0, 8000);
+          const preview = (att.content || "");
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1137,45 +1194,97 @@ If results are sparse or off-topic, say so clearly and note what is missing.`;
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
-        ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
+        ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
       ];
 
       const { data: mainData } = await callAI(mainApiMsgs);
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
 
-      // ─── STEP 4: Final Reviewer — quick accuracy and completeness check ───
-      // Only run final review when web research was conducted (adds value checking cited facts)
-      let finalRaw = mainRaw;
-      if (reviewerFindings.length > 0) {
-        setActivityStatus("Final reviewer checking response...");
-        const finalReviewerSystem = `You are a final review agent (Light). Your job is to quickly check the following response for obvious errors or omissions before it is shown to the user.
-Check:
-1. Does it answer the user's actual question?
-2. Are any cited facts consistent with the web research provided?
-3. Are all required tags (<expression>, <memory_update>) present and intact?
+      // ─── STEP 4: Iterative Self-Reflection Loop (5 passes — ALWAYS runs) ───
+      let refinedRaw = mainRaw;
+      const REFLECTION_PASSES = 5;
+      const reflectionChecks = [
+        { name: "Accuracy & Factual Correctness", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Flag anything that seems incorrect or unsupported. Verify any web research citations are accurate." },
+        { name: "Document Alignment & Page Citations", focus: "Verify EVERY claim references specific uploaded documents by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Every statement about a document MUST have a page citation." },
+        { name: "Completeness & Depth", focus: "Check if any aspect of the user's question was missed or addressed superficially. Ensure ALL uploaded documents were consulted and referenced. Add any missing analysis. Check that the response structure includes Document Summary, Key Findings, Cross-Reference Analysis, Discrepancies, Compliance Notes, Recommendations, and References sections where appropriate." },
+        { name: "Cross-Reference Quality", focus: "Check cross-references BETWEEN documents. Are discrepancies between documents identified? Is the trust deed compared with the investment strategy? Are member statements reconciled with financial reports? Are compliance gaps between documents flagged? Create a Discrepancy Register if multiple documents are present." },
+        { name: "Final Polish & Coherence", focus: "Check overall structure, readability, logical flow, and professional tone. Ensure <expression> and <memory_update> tags are present and intact. Verify the response reads as authoritative SMSF expert advice that an auditor or advisor would find useful. Ensure a References section lists all cited pages." },
+      ];
 
-If the response is good, output it EXACTLY as-is — do not change a single word, tag, or character.
-If there is a clear error, fix ONLY that specific error and output the corrected version.
-CRITICAL: Preserve ALL tags exactly, especially <expression> and <memory_update> blocks.`;
+      for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
+        const check = reflectionChecks[pass];
+        setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
 
-        const researchSummary = reviewerFindings.map(({ question, findings }) => `Q: ${question}\nFindings: ${findings}`).join("\n\n");
-        const finalMsgs = [
-          { role: "system", content: finalReviewerSystem },
-          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nWeb research used:\n${researchSummary}\n\nMain agent response to review:\n${mainRaw}` },
+        const reflectionSystem = `You are a self-reflection review agent (Pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}).
+
+Your task: Review the draft response below and IMPROVE it based on this specific focus area:
+**${check.focus}**
+
+Context:
+- The user asked: "${txt || "See attached files"}"
+- The response should be an expert SMSF cross-referencing analysis with perfect page citations
+${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
+
+Rules:
+1. Output the COMPLETE improved response (not just corrections)
+2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks
+3. If the response is already excellent for this check, output it unchanged
+4. Make ONLY improvements related to your focus area — do not degrade other aspects
+5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
+6. Think carefully about whether each part of the response is actually correct and well-supported`;
+
+        const reflectionMsgs = [
+          { role: "system", content: reflectionSystem },
+          { role: "user", content: `Draft response to review and improve:\n\n${refinedRaw}` },
         ];
 
         try {
-          const { data: finalData } = await callAI(finalMsgs);
-          if (finalData.usage) setUsage(p => ({ i: p.i + (finalData.usage.prompt_tokens || 0), o: p.o + (finalData.usage.completion_tokens || 0) }));
-          finalRaw = extractRaw(finalData);
-          // Sanity check: if final reviewer mangled the tags, fall back to main response
-          if (!finalRaw.includes("<memory_update>") && mainRaw.includes("<memory_update>")) {
-            finalRaw = mainRaw;
+          const { data: reflectData } = await callAI(reflectionMsgs);
+          if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
+          const reflectRaw = extractRaw(reflectData);
+          // Sanity check: keep memory_update tag integrity
+          if (reflectRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || reflectRaw.includes("<memory_update>"))) {
+            refinedRaw = reflectRaw;
           }
-        } catch {
-          finalRaw = mainRaw; // Fall back to main response on reviewer error
+        } catch (reflectErr) {
+          console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
+          // Continue with current refined version
         }
+      }
+
+      // ─── STEP 5: Post-Creation Verification — "Did I do good work?" ───
+      setActivityStatus("Final verification: checking quality of work...");
+      const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
+
+Review this SMSF expert response and check:
+1. Does it FULLY answer the user's question with no gaps?
+2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
+3. Are there any compliance issues, misleading statements, or incorrect legislative references?
+4. Is the cross-referencing between documents thorough and systematic?
+5. Would a professional SMSF auditor or financial advisor find this useful, accurate, and complete?
+6. Is the response structured properly with clear sections?
+7. Are all <expression> and <memory_update> tags present and intact?
+
+If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
+If NO (there are problems): Fix the specific issues and output the corrected version.
+CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think carefully about whether the work is actually good.`;
+
+      const verifyMsgs = [
+        { role: "system", content: verificationSystem },
+        { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
+      ];
+
+      let finalRaw = refinedRaw;
+      try {
+        const { data: verifyData } = await callAI(verifyMsgs);
+        if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
+        const verifyRaw = extractRaw(verifyData);
+        if (verifyRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || verifyRaw.includes("<memory_update>"))) {
+          finalRaw = verifyRaw;
+        }
+      } catch {
+        finalRaw = refinedRaw; // Fall back to refined response on verification error
       }
 
       // ─── Finalise: parse response and update state ───
