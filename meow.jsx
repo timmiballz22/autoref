@@ -31,6 +31,7 @@ const LOCAL_MODELS = [
     ram: "2GB RAM",
     cpu: "Any CPU",
     desc: "Fastest. Basic quality. Works on low-end hardware.",
+    // Qwen 2.5 0.5B natively supports 32K context — safe for Aspire 5
     contextWindow: 32768,
     slidingWindow: 32768,
     prefillChunk: 2048,
@@ -44,8 +45,9 @@ const LOCAL_MODELS = [
     ram: "4GB RAM",
     cpu: "Modern multi-core",
     desc: "Balanced speed and quality.",
-    contextWindow: 131072,
-    slidingWindow: 131072,
+    // Llama 3.2 supports 128K natively; capped at 32K for Aspire 5 VRAM safety
+    contextWindow: 32768,
+    slidingWindow: 32768,
     prefillChunk: 4096,
   },
   {
@@ -57,28 +59,42 @@ const LOCAL_MODELS = [
     ram: "6GB RAM",
     cpu: "Modern GPU recommended",
     desc: "Best quality. Slower on weak hardware.",
-    contextWindow: 131072,
-    slidingWindow: 131072,
+    // Phi 3.5 supports 128K natively; capped at 32K for Aspire 5 VRAM safety
+    contextWindow: 32768,
+    slidingWindow: 32768,
     prefillChunk: 4096,
   },
 ];
 
 // ─── Build WebLLM engine config with expanded context window ───
-function buildEngineConfig(modelId) {
+// IMPORTANT: We must use WebLLM's prebuiltAppConfig and only modify overrides.
+// Creating a custom model_list with wrong URLs causes WASM loading to fail
+// (WebAssembly gets an HTML 404 page instead of a .wasm binary).
+async function buildEngineConfig(modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
-  if (!modelDef) return {};
-  return {
-    model_list: [{
-      model: `https://huggingface.co/mlc-ai/${modelId}`,
-      model_id: modelId,
-      model_lib: modelId,
-      overrides: {
+  if (!modelDef) return undefined;
+  try {
+    const webllm = await getWebLLM();
+    // Get the built-in model registry with correct URLs, model_lib paths, etc.
+    const prebuilt = webllm.prebuiltAppConfig || webllm.prebuiltAppConfigs;
+    if (!prebuilt || !prebuilt.model_list) return undefined;
+    // Deep-clone so we don't mutate the original
+    const config = JSON.parse(JSON.stringify(prebuilt));
+    // Find our model in the registry and apply context window overrides
+    const entry = config.model_list.find(m => m.model_id === modelId);
+    if (entry) {
+      entry.overrides = {
+        ...(entry.overrides || {}),
         context_window_size: modelDef.contextWindow,
         sliding_window_size: modelDef.slidingWindow,
         prefill_chunk_size: modelDef.prefillChunk,
-      },
-    }],
-  };
+      };
+    }
+    return config;
+  } catch (e) {
+    console.warn("Failed to build engine config with overrides:", e);
+    return undefined;
+  }
 }
 
 // ─── Estimate token count from text (rough ~3.8 chars per token) ───
@@ -675,14 +691,13 @@ function Auto() {
         setLocalModelProgressText("Auto-loading model from cache...");
         try {
           const webllm = await getWebLLM();
-          const engineCfg = buildEngineConfig(localModelId);
-          const engine = await webllm.CreateMLCEngine(localModelId, {
-            appConfig: engineCfg,
-            initProgressCallback: (p) => {
-              setLocalModelProgress(Math.round((p.progress || 0) * 100));
-              setLocalModelProgressText(p.text || "");
-            },
-          });
+          const engineCfg = await buildEngineConfig(localModelId);
+          const engineOpts = { initProgressCallback: (p) => {
+            setLocalModelProgress(Math.round((p.progress || 0) * 100));
+            setLocalModelProgressText(p.text || "");
+          }};
+          if (engineCfg) engineOpts.appConfig = engineCfg;
+          const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
           localEngineRef.current = engine;
           setLocalModelStatus("ready");
           setUseLocalModel(true);
@@ -805,14 +820,13 @@ function Auto() {
     setLocalModelProgressText("Fetching WebLLM engine...");
     try {
       const webllm = await getWebLLM();
-      const engineCfg = buildEngineConfig(localModelId);
-      const engine = await webllm.CreateMLCEngine(localModelId, {
-        appConfig: engineCfg,
-        initProgressCallback: (p) => {
-          setLocalModelProgress(Math.round((p.progress || 0) * 100));
-          setLocalModelProgressText(p.text || "");
-        },
-      });
+      const engineCfg = await buildEngineConfig(localModelId);
+      const engineOpts = { initProgressCallback: (p) => {
+        setLocalModelProgress(Math.round((p.progress || 0) * 100));
+        setLocalModelProgressText(p.text || "");
+      }};
+      if (engineCfg) engineOpts.appConfig = engineCfg;
+      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
@@ -835,14 +849,13 @@ function Auto() {
     setLocalModelProgressText("Loading from cache...");
     try {
       const webllm = await getWebLLM();
-      const engineCfg = buildEngineConfig(localModelId);
-      const engine = await webllm.CreateMLCEngine(localModelId, {
-        appConfig: engineCfg,
-        initProgressCallback: (p) => {
-          setLocalModelProgress(Math.round((p.progress || 0) * 100));
-          setLocalModelProgressText(p.text || "");
-        },
-      });
+      const engineCfg = await buildEngineConfig(localModelId);
+      const engineOpts = { initProgressCallback: (p) => {
+        setLocalModelProgress(Math.round((p.progress || 0) * 100));
+        setLocalModelProgressText(p.text || "");
+      }};
+      if (engineCfg) engineOpts.appConfig = engineCfg;
+      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
@@ -1305,7 +1318,10 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
       // Provide helpful error messages for common issues
       if (e.message && e.message.includes("context window")) {
-        throw new Error(`Document too large for current model. Try removing some documents or using a larger model (Llama 3.2 3B or Phi 3.5 Mini have 128K context). Original: ${e.message}`);
+        throw new Error(`Document too large for current model. Try removing some documents or shortening your chat history. Original: ${e.message}`);
+      }
+      if (e.message && (e.message.includes("magic word") || e.message.includes("WebAssembly"))) {
+        throw new Error(`Model files corrupted or incomplete. Please delete and re-download the model from the sidebar. (${e.message})`);
       }
       throw new Error(`Local model error: ${e.message}`);
     }
@@ -1459,7 +1475,7 @@ Rules:
       // Stream the main response for real-time display
       // Use generous max_tokens — model context window supports it now
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const mainMaxTokens = modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.15), 16384) : 4096;
+      const mainMaxTokens = modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.25), 8192) : 4096;
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -1699,7 +1715,11 @@ ${chatHtml}
     const printWin = window.open(url, "_blank");
     if (printWin) {
       printWin.onload = () => {
-        setTimeout(() => { printWin.print(); }, 500);
+        setTimeout(() => {
+          printWin.print();
+          // Revoke after print dialog — delay to ensure content is fully loaded
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        }, 500);
       };
     } else {
       // Fallback: download as HTML
@@ -1707,8 +1727,8 @@ ${chatHtml}
       a.href = url;
       a.download = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
       a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
     }
-    URL.revokeObjectURL(url);
   }, [msgs, pdfDocs, localModelId]);
 
   // ═══ RENDER ═══
