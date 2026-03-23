@@ -125,12 +125,17 @@ async function saveChat(msgs) {
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
 // ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
-async function extractPdfContent(arrayBuffer, fileName) {
+// Optimised for 1000+ page documents: batched processing, lower scale, limited images
+const MAX_PAGE_IMAGES = 3; // Only render first 3 scanned pages as images to save memory
+
+async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const pageCount = pdf.numPages;
   let fullText = "";
   const pageImages = [];
+  const BATCH_SIZE = 10; // Yield to UI every 10 pages
+  const skipImages = pageCount > 200; // Don't render images for very large docs
 
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i);
@@ -181,23 +186,37 @@ async function extractPdfContent(arrayBuffer, fileName) {
     if (pageText.length > 30) {
       // Enough text content — use extracted text with spatial layout preserved
       fullText += pageText;
-    } else {
-      // Scanned/handwritten page — render to image for AI to "see"
+    } else if (!skipImages && pageImages.length < MAX_PAGE_IMAGES) {
+      // Scanned/handwritten page — render to image (limited to first MAX_PAGE_IMAGES)
       fullText += "(Scanned/handwritten page — see attached page image)";
       try {
-        const scale = 3.0; // ~300 DPI for better quality rendering
+        const scale = 1.5; // ~150 DPI — 75% less memory than 3.0 scale
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.95) });
+        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
+        // Release canvas memory immediately
+        canvas.width = 0;
+        canvas.height = 0;
       } catch (e) {
         console.warn(`Failed to render page ${i} as image:`, e);
         fullText += "\n(Could not render page image)";
       }
+    } else {
+      // Scanned page but skip image rendering (too many or large document)
+      fullText += "(Scanned/handwritten page — text not extractable, image omitted to save memory)";
     }
+
+    // Yield to UI thread every BATCH_SIZE pages and report progress
+    if (i % BATCH_SIZE === 0) {
+      if (onProgress) onProgress(i, pageCount);
+      await new Promise(r => setTimeout(r, 0));
+    }
+    // Clean up page reference
+    page.cleanup();
   }
 
   return { text: fullText.trim(), pageCount, pageImages };
@@ -236,6 +255,34 @@ async function searchWeb(query) {
     }
   }
   return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
+}
+
+// ─── Document Indexing for 1000+ page PDFs ───
+// Builds a compact Table of Contents from extracted PDF text
+function buildDocIndex(docText, pageCount) {
+  const pages = docText.split(/=== \[Page \d+\] ===/);
+  const toc = [];
+  for (let i = 1; i < pages.length && i <= pageCount; i++) {
+    const pageContent = (pages[i] || "").trim();
+    const preview = pageContent.slice(0, 150).replace(/\s+/g, " ").trim();
+    if (preview) toc.push(`Page ${i}: ${preview}...`);
+    else toc.push(`Page ${i}: (empty or scanned page)`);
+  }
+  return toc.join("\n");
+}
+
+// Extracts text for specific page range from a document's full text
+function getDocPages(docText, startPage, endPage) {
+  const parts = [];
+  for (let p = startPage; p <= endPage; p++) {
+    const marker = `=== [Page ${p}] ===`;
+    const nextMarker = `=== [Page ${p + 1}] ===`;
+    const startIdx = docText.indexOf(marker);
+    if (startIdx < 0) continue;
+    const endIdx = docText.indexOf(nextMarker, startIdx);
+    parts.push(docText.slice(startIdx, endIdx > startIdx ? endIdx : undefined).trim());
+  }
+  return parts.join("\n\n");
 }
 
 // ─── Markdown Renderer ───
@@ -337,7 +384,7 @@ function il(t) {
 }
 
 // ─── PDF Viewer Component ───
-function PdfViewer({ pdfData, onClose }) {
+function PdfViewer({ pdfData, blobUrl, onClose }) {
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
@@ -346,11 +393,23 @@ function PdfViewer({ pdfData, onClose }) {
   const [jumpPage, setJumpPage] = useState("");
 
   useEffect(() => {
-    if (!pdfData || !window.pdfjsLib) return;
+    if (!window.pdfjsLib) return;
+    // Support both legacy ArrayBuffer (pdfData) and new Blob URL (blobUrl)
+    const source = blobUrl || pdfData;
+    if (!source) return;
     let cancelled = false;
     (async () => {
       try {
-        const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
+        let loadSource;
+        if (blobUrl) {
+          // Fetch the Blob URL to get ArrayBuffer on-demand (lazy loading)
+          const resp = await fetch(blobUrl);
+          const buf = await resp.arrayBuffer();
+          loadSource = { data: buf };
+        } else {
+          loadSource = { data: pdfData };
+        }
+        const pdf = await pdfjsLib.getDocument(loadSource).promise;
         if (cancelled) return;
         pdfDocRef.current = pdf;
         setTotalPages(pdf.numPages);
@@ -360,7 +419,7 @@ function PdfViewer({ pdfData, onClose }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [pdfData]);
+  }, [pdfData, blobUrl]);
 
   useEffect(() => {
     if (!pdfDocRef.current || !canvasRef.current) return;
@@ -475,9 +534,10 @@ function Auto() {
   const [localModelProgress, setLocalModelProgress] = useState(0);
   const [localModelProgressText, setLocalModelProgressText] = useState("");
   const [useLocalModel, setUseLocalModel] = useState(false);
-  const [pdfDocs, setPdfDocs] = useState([]); // [{name, text, pageCount, pageImages, arrayBuffer}]
+  const [pdfDocs, setPdfDocs] = useState([]); // [{name, text, pageCount, pageImages, blobUrl}]
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
   const [pdfViewerIdx, setPdfViewerIdx] = useState(0); // which pdf to view
+  const [streamingText, setStreamingText] = useState(""); // real-time streaming response
 
   // Load on mount — auto-load previously cached model
   useEffect(() => {
@@ -544,8 +604,8 @@ function Auto() {
       try { if (memRef.current) saveVal(MEMORY_STORAGE_KEY, memRef.current); } catch {}
     };
 
-    // Auto-save every 15 seconds
-    const autoSaveInterval = setInterval(persistState, 15000);
+    // Auto-save every 60 seconds (reduced from 15s — localStorage writes block main thread)
+    const autoSaveInterval = setInterval(persistState, 60000);
 
     // Save when tab goes to background or is hidden
     const onVisibilityChange = () => {
@@ -568,9 +628,14 @@ function Auto() {
     };
   }, []);
 
+  // Debounced scroll-into-view to prevent excessive smooth scrolling during streaming
+  const scrollTimerRef = useRef(null);
   useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgs, busy]);
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => {
+      scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 150);
+  }, [msgs, busy, streamingText]);
 
   // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
   useEffect(() => {
@@ -791,16 +856,22 @@ function Auto() {
         reader.onload = async () => {
           try {
             const arrayBuffer = reader.result;
-            const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name);
+            setActivityStatus(`Extracting PDF: ${file.name}...`);
+            const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name, (current, total) => {
+              setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
+            });
+            setActivityStatus("");
             setAttachments(prev => {
               if (prev.length >= MAX_ATTACHMENTS) return prev;
               return [...prev, { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }];
             });
-            // Store PDF data for viewer
-            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, arrayBuffer: arrayBuffer.slice(0) }]);
+            // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
+            const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
+            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
+            setActivityStatus("");
           }
         };
         reader.readAsArrayBuffer(file);
@@ -899,10 +970,28 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 7. **References**: Complete list of all document pages cited`;
 
     // Include uploaded PDF document content for cross-referencing
+    // Optimised for 1000+ page documents: uses TOC + key pages instead of full text
     if (pdfDocs.length > 0) {
-      s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number:\n`;
+      s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number.\n`;
       for (const doc of pdfDocs) {
-        s += `\n<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text}\n</document>\n`;
+        const MAX_FULL_TEXT_CHARS = 25000; // ~6.5K tokens per document
+        if (doc.text.length <= MAX_FULL_TEXT_CHARS) {
+          // Small document — include full text
+          s += `\n<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text}\n</document>\n`;
+        } else {
+          // Large document — include TOC + first 10 pages + last 5 pages
+          const toc = buildDocIndex(doc.text, doc.pageCount);
+          const firstPages = getDocPages(doc.text, 1, Math.min(10, doc.pageCount));
+          const lastStart = Math.max(11, doc.pageCount - 4);
+          const lastPages = doc.pageCount > 10 ? getDocPages(doc.text, lastStart, doc.pageCount) : "";
+          s += `\n<document name="${doc.name}" pages="${doc.pageCount}" indexed="true">`;
+          s += `\n\n--- TABLE OF CONTENTS ---\nThis is a ${doc.pageCount}-page document. Below is a summary of each page. For specific page content, reference the page numbers shown.\n${toc}\n`;
+          s += `\n\n--- FIRST PAGES (1-${Math.min(10, doc.pageCount)}) ---\n${firstPages}\n`;
+          if (lastPages) {
+            s += `\n\n--- LAST PAGES (${lastStart}-${doc.pageCount}) ---\n${lastPages}\n`;
+          }
+          s += `\n[NOTE: This document has ${doc.pageCount} pages. The TOC above summarises all pages. First and last pages are shown in full. For middle pages, cite the page numbers from the TOC and reference what was summarised.]\n</document>\n`;
+        }
       }
       s += `</documents>`;
     }
@@ -1007,26 +1096,68 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   }, []);
 
   // ─── Call AI (offline-only — local models only, no cloud) ───
-  const callAI = useCallback(async (apiMsgs) => {
+  // Options: { maxTokens, onChunk, timeoutMs }
+  const callAI = useCallback(async (apiMsgs, opts = {}) => {
+    const { maxTokens = 4096, onChunk = null, timeoutMs = 90000 } = opts;
     // Validate engine is loaded
     if (!localEngineRef.current) {
       throw new Error("No model loaded. Please download and load a local model from the sidebar before sending messages.");
     }
 
-    try {
-      const resp = await localEngineRef.current.chat.completions.create({
-        messages: apiMsgs,
-        temperature: 0.7,
-        max_tokens: 32768,
+    // Timeout wrapper
+    const withTimeout = (promise) => {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("LLM call timed out — try a shorter query or simpler model")), timeoutMs);
+        promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
       });
-      const content = resp.choices?.[0]?.message?.content || "";
+    };
+
+    const doCall = async (engine) => {
+      // Use streaming if onChunk callback is provided
+      if (onChunk) {
+        const stream = await engine.chat.completions.create({
+          messages: apiMsgs,
+          temperature: 0.7,
+          max_tokens: maxTokens,
+          stream: true,
+        });
+        let content = "";
+        let usage = { prompt_tokens: 0, completion_tokens: 0 };
+        for await (const chunk of stream) {
+          const delta = chunk.choices?.[0]?.delta?.content || "";
+          if (delta) {
+            content += delta;
+            onChunk(content);
+          }
+          if (chunk.usage) {
+            usage = { prompt_tokens: chunk.usage.prompt_tokens || 0, completion_tokens: chunk.usage.completion_tokens || 0 };
+          }
+        }
+        // WebLLM may report usage in final chunk or via engine
+        if (!usage.prompt_tokens && stream.usage) {
+          usage = { prompt_tokens: stream.usage.prompt_tokens || 0, completion_tokens: stream.usage.completion_tokens || 0 };
+        }
+        return { content, usage };
+      } else {
+        const resp = await engine.chat.completions.create({
+          messages: apiMsgs,
+          temperature: 0.7,
+          max_tokens: maxTokens,
+        });
+        const content = resp.choices?.[0]?.message?.content || "";
+        return {
+          content,
+          usage: { prompt_tokens: resp.usage?.prompt_tokens || 0, completion_tokens: resp.usage?.completion_tokens || 0 },
+        };
+      }
+    };
+
+    try {
+      const { content, usage } = await withTimeout(doCall(localEngineRef.current));
       return {
         data: {
           choices: [{ message: { content } }],
-          usage: {
-            prompt_tokens: resp.usage?.prompt_tokens || 0,
-            completion_tokens: resp.usage?.completion_tokens || 0,
-          },
+          usage,
         },
         usedModel: localModelId,
       };
@@ -1036,20 +1167,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       if (e.message && e.message.includes("not loaded")) {
         try {
           await localEngineRef.current.reload(localModelId);
-          // Retry once after reload
-          const resp = await localEngineRef.current.chat.completions.create({
-            messages: apiMsgs,
-            temperature: 0.7,
-            max_tokens: 32768,
-          });
-          const content = resp.choices?.[0]?.message?.content || "";
+          const { content, usage } = await withTimeout(doCall(localEngineRef.current));
           return {
             data: {
               choices: [{ message: { content } }],
-              usage: {
-                prompt_tokens: resp.usage?.prompt_tokens || 0,
-                completion_tokens: resp.usage?.completion_tokens || 0,
-              },
+              usage,
             },
             usedModel: localModelId,
           };
@@ -1061,12 +1183,12 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     }
   }, [localModelId]);
 
-  // ─── Main send function with research loop ───
+  // ─── Main send function with optimised research loop ───
   const send = useCallback(async () => {
     const txt = input.trim();
     if (!txt && attachments.length === 0) return;
     if (busy || busyRef.current) return; // ref-based double-send guard
-    setErr(null); setBusy(true); busyRef.current = true; setActivityStatus("");
+    setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
     // Build user message content with attachments
     let userContent = txt;
@@ -1076,7 +1198,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         if (att.isImage) {
           attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
         } else {
-          const preview = (att.content || "");
+          const preview = (att.content || "").slice(0, 2000); // Limit preview in chat message
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1099,6 +1221,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       return raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     };
 
+    // Determine query complexity for adaptive pipeline
+    const hasDocuments = pdfDocs.length > 0;
+    const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
+    let checkpointRaw = ""; // Partial response checkpoint for crash recovery
+
     try {
       // Offline-only: require a loaded local model
       if (!localEngineRef.current) {
@@ -1106,11 +1233,13 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 80;
+      const MAX_MSGS = 20;
 
-      // ─── STEP 1: Main planning — decide if web research is needed ───
-      setActivityStatus("Main agent analysing query...");
-      const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
+      // ─── STEP 1: Planning — skip for document queries & simple queries ───
+      let researchQuestions = [];
+      if (!hasDocuments && !isSimpleQuery) {
+        setActivityStatus("Planning: checking if web research is needed...");
+        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
 {"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
 or
@@ -1122,63 +1251,63 @@ Rules:
 - If true, provide 2–3 specific, searchable questions (max 3)
 - Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
 
-      const planningMsgs = [
-        { role: "system", content: planningSystem },
-        { role: "user", content: `User question: "${txt || "See attached files"}"` },
-      ];
-
-      let researchQuestions = [];
-      try {
-        const { data: planData } = await callAI(planningMsgs);
-        if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-        const planRaw = extractRaw(planData);
-        const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const plan = JSON.parse(jsonMatch[0]);
-          if (plan.needs_research && Array.isArray(plan.questions)) {
-            researchQuestions = plan.questions.slice(0, 3);
-          }
-        }
-      } catch (planErr) {
-        // If planning fails, proceed without web research
-        console.warn("Planning step failed, skipping web research:", planErr);
-      }
-
-      // ─── STEP 2: Reviewer agents — search the web and summarise ───
-      const reviewerFindings = [];
-      for (let i = 0; i < researchQuestions.length; i++) {
-        const question = researchQuestions[i];
-        setActivityStatus(`Reviewer ${i + 1} of ${researchQuestions.length} researching: "${question}"...`);
-
-        // Fetch web search results
-        let searchResults = "";
-        try {
-          searchResults = await searchWeb(question);
-        } catch (searchErr) {
-          searchResults = `Search unavailable: ${searchErr.message}`;
-        }
-
-        // Reviewer LLM summarises the search results
-        const reviewerSystem = `You are a web research reviewer assistant. You have searched the web and received results for a specific question.
-Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.
-If results are sparse or off-topic, say so clearly and note what is missing.`;
-
-        const reviewerMsgs = [
-          { role: "system", content: reviewerSystem },
-          { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
+        const planningMsgs = [
+          { role: "system", content: planningSystem },
+          { role: "user", content: `User question: "${txt || "See attached files"}"` },
         ];
 
         try {
-          const { data: reviewerData } = await callAI(reviewerMsgs);
-          if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-          const findings = extractRaw(reviewerData);
-          reviewerFindings.push({ question, findings });
-        } catch (reviewErr) {
-          reviewerFindings.push({ question, findings: `Reviewer error: ${reviewErr.message}` });
+          const { data: planData } = await callAI(planningMsgs, { maxTokens: 512, timeoutMs: 30000 });
+          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
+          const planRaw = extractRaw(planData);
+          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const plan = JSON.parse(jsonMatch[0]);
+            if (plan.needs_research && Array.isArray(plan.questions)) {
+              researchQuestions = plan.questions.slice(0, 3);
+            }
+          }
+        } catch (planErr) {
+          console.warn("Planning step failed, skipping web research:", planErr);
         }
       }
 
-      // ─── STEP 3: Main agent synthesises with research context ───
+      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
+      const reviewerFindings = [];
+      if (researchQuestions.length > 0) {
+        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
+
+        const reviewerPromises = researchQuestions.map(async (question, i) => {
+          let searchResults = "";
+          try {
+            searchResults = await searchWeb(question);
+          } catch (searchErr) {
+            searchResults = `Search unavailable: ${searchErr.message}`;
+          }
+
+          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
+          const reviewerMsgs = [
+            { role: "system", content: reviewerSystem },
+            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
+          ];
+
+          try {
+            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 1024, timeoutMs: 45000 });
+            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
+            const findings = extractRaw(reviewerData);
+            return { question, findings };
+          } catch (reviewErr) {
+            return { question, findings: `Reviewer error: ${reviewErr.message}` };
+          }
+        });
+
+        const results = await Promise.allSettled(reviewerPromises);
+        for (const r of results) {
+          if (r.status === "fulfilled") reviewerFindings.push(r.value);
+        }
+      }
+
+      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
       setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
@@ -1197,25 +1326,32 @@ If results are sparse or off-topic, say so clearly and note what is missing.`;
         ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
       ];
 
-      const { data: mainData } = await callAI(mainApiMsgs);
+      // Stream the main response for real-time display
+      const { data: mainData } = await callAI(mainApiMsgs, {
+        maxTokens: 4096,
+        timeoutMs: 120000,
+        onChunk: (partial) => setStreamingText(partial),
+      });
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
+      setStreamingText(""); // Clear streaming display
 
-      // ─── STEP 4: Iterative Self-Reflection Loop (5 passes — ALWAYS runs) ───
+      // Save checkpoint — if reflection crashes, we still have the main response
+      checkpointRaw = mainRaw;
+
+      // ─── STEP 4: Adaptive Self-Reflection Loop (2 passes — Socratic review preserved) ───
       let refinedRaw = mainRaw;
-      const REFLECTION_PASSES = 5;
+      const REFLECTION_PASSES = 2;
       const reflectionChecks = [
-        { name: "Accuracy & Factual Correctness", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Flag anything that seems incorrect or unsupported. Verify any web research citations are accurate." },
-        { name: "Document Alignment & Page Citations", focus: "Verify EVERY claim references specific uploaded documents by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Every statement about a document MUST have a page citation." },
-        { name: "Completeness & Depth", focus: "Check if any aspect of the user's question was missed or addressed superficially. Ensure ALL uploaded documents were consulted and referenced. Add any missing analysis. Check that the response structure includes Document Summary, Key Findings, Cross-Reference Analysis, Discrepancies, Compliance Notes, Recommendations, and References sections where appropriate." },
-        { name: "Cross-Reference Quality", focus: "Check cross-references BETWEEN documents. Are discrepancies between documents identified? Is the trust deed compared with the investment strategy? Are member statements reconciled with financial reports? Are compliance gaps between documents flagged? Create a Discrepancy Register if multiple documents are present." },
-        { name: "Final Polish & Coherence", focus: "Check overall structure, readability, logical flow, and professional tone. Ensure <expression> and <memory_update> tags are present and intact. Verify the response reads as authoritative SMSF expert advice that an auditor or advisor would find useful. Ensure a References section lists all cited pages." },
+        { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
+        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         const check = reflectionChecks[pass];
         setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
 
+        // Reflection prompts do NOT include full document text — only the draft response
         const reflectionSystem = `You are a self-reflection review agent (Pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}).
 
 Your task: Review the draft response below and IMPROVE it based on this specific focus area:
@@ -1225,6 +1361,7 @@ Context:
 - The user asked: "${txt || "See attached files"}"
 - The response should be an expert SMSF cross-referencing analysis with perfect page citations
 ${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
+${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
@@ -1240,7 +1377,7 @@ Rules:
         ];
 
         try {
-          const { data: reflectData } = await callAI(reflectionMsgs);
+          const { data: reflectData } = await callAI(reflectionMsgs, { maxTokens: 4096, timeoutMs: 90000 });
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
           // Sanity check: keep memory_update tag integrity
@@ -1253,38 +1390,38 @@ Rules:
         }
       }
 
-      // ─── STEP 5: Post-Creation Verification — "Did I do good work?" ───
-      setActivityStatus("Final verification: checking quality of work...");
-      const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
+      // ─── STEP 5: Verification — only for complex document queries ───
+      let finalRaw = refinedRaw;
+      if (hasDocuments && !isSimpleQuery) {
+        setActivityStatus("Final verification: checking quality of work...");
+        const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
 
 Review this SMSF expert response and check:
 1. Does it FULLY answer the user's question with no gaps?
 2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
 3. Are there any compliance issues, misleading statements, or incorrect legislative references?
 4. Is the cross-referencing between documents thorough and systematic?
-5. Would a professional SMSF auditor or financial advisor find this useful, accurate, and complete?
-6. Is the response structured properly with clear sections?
-7. Are all <expression> and <memory_update> tags present and intact?
+5. Are all <expression> and <memory_update> tags present and intact?
 
 If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
 If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think carefully about whether the work is actually good.`;
+CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
 
-      const verifyMsgs = [
-        { role: "system", content: verificationSystem },
-        { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
-      ];
+        const verifyMsgs = [
+          { role: "system", content: verificationSystem },
+          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
+        ];
 
-      let finalRaw = refinedRaw;
-      try {
-        const { data: verifyData } = await callAI(verifyMsgs);
-        if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
-        const verifyRaw = extractRaw(verifyData);
-        if (verifyRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || verifyRaw.includes("<memory_update>"))) {
-          finalRaw = verifyRaw;
+        try {
+          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: 4096, timeoutMs: 90000 });
+          if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
+          const verifyRaw = extractRaw(verifyData);
+          if (verifyRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || verifyRaw.includes("<memory_update>"))) {
+            finalRaw = verifyRaw;
+          }
+        } catch {
+          finalRaw = refinedRaw; // Fall back to refined response on verification error
         }
-      } catch {
-        finalRaw = refinedRaw; // Fall back to refined response on verification error
       }
 
       // ─── Finalise: parse response and update state ───
@@ -1313,15 +1450,35 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think caref
       saveChat(currentMsgs);
 
     } catch (e) {
-      if (e.name !== "AbortError") setErr(e.message);
+      if (e.name !== "AbortError") {
+        setErr(e.message);
+        // Partial response recovery: if we have a checkpoint, show it
+        if (typeof checkpointRaw === "string" && checkpointRaw.length > 50) {
+          try {
+            const { text: partialText, actions: partialActions } = parseResponse(checkpointRaw);
+            if (partialText) {
+              currentMsgs = [...currentMsgs, { role: "assistant", content: partialText + `\n\n---\n*⚠ Partial response — review pipeline was interrupted: ${e.message}*` }];
+              setMsgs([...currentMsgs]);
+              saveChat(currentMsgs);
+              if (partialActions.expression) setExpression(partialActions.expression);
+              if (partialActions.memoryUpdate) {
+                setMem(partialActions.memoryUpdate);
+                setMemDraft(partialActions.memoryUpdate);
+                saveVal(MEMORY_STORAGE_KEY, partialActions.memoryUpdate);
+              }
+            }
+          } catch {}
+        }
+      }
       try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
     } finally {
       setBusy(false);
       busyRef.current = false;
       setActivityStatus("");
+      setStreamingText("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, useLocalModel]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
 
   // ─── Expression image resolver — blink overrides all other states ───
   const getExprImg = useCallback((speakingOverride = false) => {
@@ -1350,6 +1507,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think caref
       {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
         <PdfViewer
           pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
+          blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
           onClose={() => setPdfViewerOpen(false)}
         />
       )}
@@ -1618,7 +1776,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think caref
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {msgs.map((m, i) => {
                 return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "content" }}>
                     {m.role === "assistant" && (
                       <img
                         src="./Expressions/Happy.png"
@@ -1633,6 +1791,15 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think caref
                   </div>
                 );
               })}
+              {/* Streaming response display — shows text as it generates */}
+              {streamingText && busy && (
+                <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                  <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                  <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
+                    <Md text={streamingText} />
+                  </div>
+                </div>
+              )}
               {busy && (
                 <div style={{ opacity: .6, fontSize: "12px", padding: "6px 2px", display: "flex", alignItems: "center", gap: "8px" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "24px", height: "24px", imageRendering: "pixelated", animation: "bounce 1s infinite" }} onError={(e) => { e.target.style.display = "none"; }} />
@@ -1653,7 +1820,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly. Think caref
               src={getExprImg(busy)}
               alt="Auto"
               style={{
-                width: "160px", height: "160px", imageRendering: "pixelated",
+                width: "80px", height: "80px", imageRendering: "pixelated",
               }}
               onError={(e) => { e.target.style.display = "none"; }}
             />
