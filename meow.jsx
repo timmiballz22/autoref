@@ -19,6 +19,29 @@ async function getWebLLM() {
   return _webllmModule;
 }
 
+// ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
+function createStreamThrottle(setState, intervalMs = 120) {
+  let pending = null;
+  let timer = null;
+  return {
+    update(value) {
+      pending = value;
+      if (!timer) {
+        timer = setTimeout(() => {
+          if (pending !== null) setState(pending);
+          timer = null;
+        }, intervalMs);
+      }
+    },
+    flush() {
+      if (timer) clearTimeout(timer);
+      if (pending !== null) setState(pending);
+      pending = null;
+      timer = null;
+    },
+  };
+}
+
 // ─── Local Model Config ───
 const LOCAL_MODEL_KEY = "auto-local-model-id";
 const LOCAL_MODELS = [
@@ -81,19 +104,22 @@ function buildEngineConfig(modelId) {
   };
 }
 
-// ─── Estimate token count from text (rough ~3.8 chars per token) ───
+// ─── Estimate token count from text (conservative ~3.2 chars per token to prevent OOM) ───
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 3.8);
+  return Math.ceil(text.length / 3.2);
 }
 
 // ─── Get current model's context budget for documents ───
+// Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU)
 function getDocTokenBudget(modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
   const totalCtx = modelDef ? modelDef.contextWindow : 32768;
-  // Reserve tokens: system prompt (~3K), chat history (~4K), generation (~4K), memory (~1K)
-  const reserved = 12000;
-  return Math.max(totalCtx - reserved, 8000);
+  // For small models (Qwen 0.5B), use much tighter budget — iGPU can't handle full 32K KV cache
+  const isSmallModel = totalCtx <= 32768;
+  // Reserve tokens: system prompt (~4K), chat history (~3K), generation (~3K), memory (~1K), safety margin (~2K)
+  const reserved = isSmallModel ? 16000 : 14000;
+  return Math.max(totalCtx - reserved, 6000);
 }
 
 // ─── Chunk document into page-groups for smart inclusion ───
@@ -221,7 +247,7 @@ async function loadChat() {
 }
 async function saveChat(msgs) {
   // Only save user/assistant messages, skip system research messages, cap at 100
-  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-100);
+  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
   const json = JSON.stringify(toSave);
   // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
@@ -485,6 +511,9 @@ function il(t) {
     return t;
   }
 }
+
+// ─── Memoised Markdown — prevents re-render of all messages during streaming ───
+const MemoMd = React.memo(Md);
 
 // ─── PDF Viewer Component ───
 function PdfViewer({ pdfData, blobUrl, onClose }) {
@@ -963,6 +992,15 @@ function Auto() {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 
       if (isPdf) {
+        // PDF: show immediate placeholder chip so user sees the file was accepted
+        const placeholderId = `pdf-loading-${Date.now()}-${file.name}`;
+        setAttachments(prev => {
+          if (prev.length >= MAX_ATTACHMENTS) return prev;
+          return [...prev, { name: file.name, type: "application/pdf", content: "", size: file.size, isPdf: true, pageCount: 0, pageImages: [], _loading: true, _id: placeholderId }];
+        });
+        // Auto-open sidebar so user sees the document will appear there
+        setSidebarOpen(true);
+
         // PDF: extract text page-by-page with page markers
         const reader = new FileReader();
         reader.onload = async () => {
@@ -973,10 +1011,12 @@ function Auto() {
               setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
             });
             setActivityStatus("");
-            setAttachments(prev => {
-              if (prev.length >= MAX_ATTACHMENTS) return prev;
-              return [...prev, { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }];
-            });
+            // Replace loading placeholder with real extracted content
+            setAttachments(prev => prev.map(att =>
+              att._id === placeholderId
+                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
+                : att
+            ));
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
             const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
             setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
@@ -984,6 +1024,8 @@ function Auto() {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
             setActivityStatus("");
+            // Remove the loading placeholder on failure
+            setAttachments(prev => prev.filter(att => att._id !== placeholderId));
           }
         };
         reader.readAsArrayBuffer(file);
@@ -1153,6 +1195,15 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
+    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
+    const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const currentTokens = estimateTokens(s);
+    if (currentTokens > maxSystemTokens) {
+      const charLimit = Math.floor(maxSystemTokens * 3.2);
+      s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
+    }
+
     return s;
   }, [mem, pdfDocs, localModelId]);
 
@@ -1239,23 +1290,41 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     const doCall = async (engine) => {
       // Use streaming if onChunk callback is provided
       if (onChunk) {
-        const stream = await engine.chat.completions.create({
-          messages: apiMsgs,
-          temperature: 0.7,
-          max_tokens: maxTokens,
-          stream: true,
-        });
+        let stream;
+        try {
+          stream = await engine.chat.completions.create({
+            messages: apiMsgs,
+            temperature: 0.7,
+            max_tokens: maxTokens,
+            stream: true,
+          });
+        } catch (createErr) {
+          // GPU OOM or context overflow often crashes here — catch and provide helpful message
+          if (createErr.message && (createErr.message.includes("memory") || createErr.message.includes("OOM") || createErr.message.includes("allocation"))) {
+            throw new Error("GPU ran out of memory. Try: (1) Close other browser tabs, (2) Remove some uploaded documents, (3) Use the Light model (Qwen 0.5B). Original: " + createErr.message);
+          }
+          throw createErr;
+        }
         let content = "";
         let usage = { prompt_tokens: 0, completion_tokens: 0 };
-        for await (const chunk of stream) {
-          const delta = chunk.choices?.[0]?.delta?.content || "";
-          if (delta) {
-            content += delta;
-            onChunk(content);
+        try {
+          for await (const chunk of stream) {
+            const delta = chunk.choices?.[0]?.delta?.content || "";
+            if (delta) {
+              content += delta;
+              onChunk(content);
+            }
+            if (chunk.usage) {
+              usage = { prompt_tokens: chunk.usage.prompt_tokens || 0, completion_tokens: chunk.usage.completion_tokens || 0 };
+            }
           }
-          if (chunk.usage) {
-            usage = { prompt_tokens: chunk.usage.prompt_tokens || 0, completion_tokens: chunk.usage.completion_tokens || 0 };
+        } catch (streamErr) {
+          // If we got partial content before the stream died, return what we have
+          if (content.length > 30) {
+            console.warn("Stream interrupted, returning partial content:", streamErr);
+            return { content: content + "\n\n[Response was cut short due to an error — the above content may be incomplete]", usage };
           }
+          throw streamErr;
         }
         // WebLLM may report usage in final chunk or via engine
         if (!usage.prompt_tokens && stream.usage) {
@@ -1316,6 +1385,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     const txt = input.trim();
     if (!txt && attachments.length === 0) return;
     if (busy || busyRef.current) return; // ref-based double-send guard
+    // Block sending if PDFs are still being extracted
+    if (attachments.some(att => att._loading)) {
+      setErr("Please wait — PDF extraction is still in progress.");
+      return;
+    }
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
     // Build user message content with attachments
@@ -1357,11 +1431,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     try {
       // Offline-only: require a loaded local model
       if (!localEngineRef.current) {
-        throw new Error("No model loaded. Please download and load a local model from the Workspace sidebar first.");
+        throw new Error("No AI model loaded yet. Click the 🧠 Workspace button (top right), then Download the Qwen 2.5 0.5B model (recommended for your hardware). Once it says READY, you can chat.");
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 30;
+      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
 
       // ─── STEP 1: Planning — skip for document queries & simple queries ───
       let researchQuestions = [];
@@ -1385,7 +1459,7 @@ Rules:
         ];
 
         try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 512, timeoutMs: 30000 });
+          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
           if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
           const planRaw = extractRaw(planData);
           const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
@@ -1399,6 +1473,9 @@ Rules:
           console.warn("Planning step failed, skipping web research:", planErr);
         }
       }
+
+      // ─── Abort check ───
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
       // ─── STEP 2: Reviewer agents — run in PARALLEL ───
       const reviewerFindings = [];
@@ -1420,7 +1497,7 @@ Rules:
           ];
 
           try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 1024, timeoutMs: 45000 });
+            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
             if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
             const findings = extractRaw(reviewerData);
             return { question, findings };
@@ -1457,30 +1534,49 @@ Rules:
       ];
 
       // Stream the main response for real-time display
-      // Use generous max_tokens — model context window supports it now
+      // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const mainMaxTokens = modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.15), 16384) : 4096;
+      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
+      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware
+      const streamThrottle = createStreamThrottle(setStreamingText, 120);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
-        onChunk: (partial) => setStreamingText(partial),
+        onChunk: (partial) => streamThrottle.update(partial),
       });
+      streamThrottle.flush(); // Ensure final content is displayed
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
       setStreamingText(""); // Clear streaming display
 
+      // ─── Abort check between pipeline steps ───
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
       // Save checkpoint — if reflection crashes, we still have the main response
       checkpointRaw = mainRaw;
 
-      // ─── STEP 4: Adaptive Self-Reflection Loop (2 passes — Socratic review preserved) ───
+      // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
+      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
+      // Uses reduced maxTokens to prevent OOM on weak hardware
       let refinedRaw = mainRaw;
-      const REFLECTION_PASSES = 2;
+      // Preserve the original memory_update in case reflection loses it
+      const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
+      const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
+
+      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
+      // Reflection uses reduced maxTokens — response should be similar length to input
+      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
+        // ─── Abort check between steps ───
+        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
         const check = reflectionChecks[pass];
         setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
 
@@ -1498,7 +1594,7 @@ ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pag
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks
+2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks — this is CRITICAL, do not lose them
 3. If the response is already excellent for this check, output it unchanged
 4. Make ONLY improvements related to your focus area — do not degrade other aspects
 5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
@@ -1510,22 +1606,41 @@ Rules:
         ];
 
         try {
-          const { data: reflectData } = await callAI(reflectionMsgs, { maxTokens: mainMaxTokens, timeoutMs: 180000 });
+          // Show streaming during reflection so user sees progress
+          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          const { data: reflectData } = await callAI(reflectionMsgs, {
+            maxTokens: reflectionMaxTokens,
+            timeoutMs: 120000,
+            onChunk: (partial) => reflectThrottle.update(partial),
+          });
+          reflectThrottle.flush();
+          setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
-          // Sanity check: keep memory_update tag integrity
-          if (reflectRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || reflectRaw.includes("<memory_update>"))) {
-            refinedRaw = reflectRaw;
+          // Sanity check: keep memory_update tag integrity — never lose memory
+          if (reflectRaw.length > 50) {
+            if (reflectRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
+              refinedRaw = reflectRaw;
+            } else if (originalMemoryBlock) {
+              // Reflection lost the memory_update — re-append it
+              refinedRaw = reflectRaw + "\n\n" + originalMemoryBlock;
+            }
           }
+          // Update checkpoint after each successful reflection
+          checkpointRaw = refinedRaw;
         } catch (reflectErr) {
           console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
-          // Continue with current refined version
+          setStreamingText("");
+          // Continue with current refined version — don't crash
         }
       }
 
       // ─── STEP 5: Verification — only for complex document queries ───
       let finalRaw = refinedRaw;
       if (hasDocuments && !isSimpleQuery) {
+        // ─── Abort check ───
+        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
         setActivityStatus("Final verification: checking quality of work...");
         const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
 
@@ -1546,11 +1661,15 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
         ];
 
         try {
-          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: mainMaxTokens, timeoutMs: 180000 });
+          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: 120000 });
           if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
           const verifyRaw = extractRaw(verifyData);
-          if (verifyRaw.length > 50 && (!refinedRaw.includes("<memory_update>") || verifyRaw.includes("<memory_update>"))) {
-            finalRaw = verifyRaw;
+          if (verifyRaw.length > 50) {
+            if (verifyRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
+              finalRaw = verifyRaw;
+            } else if (originalMemoryBlock) {
+              finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
+            }
           }
         } catch {
           finalRaw = refinedRaw; // Fall back to refined response on verification error
@@ -2029,12 +2148,20 @@ ${chatHtml}
                   Upload PDF trust deeds, investment strategies, member statements, or any SMSF documents.<br/>
                   Auto will cross-reference them with page-level citations.
                 </div>
+                {localModelStatus !== "ready" && localModelStatus !== "downloading" && localModelStatus !== "loading" && (
+                  <div style={{ marginTop: "8px", padding: "10px 16px", borderRadius: "8px", background: "rgba(204,153,85,0.08)", border: "1px solid rgba(204,153,85,0.2)", fontSize: "11px", color: "#cc9955", textAlign: "center", maxWidth: "420px", lineHeight: 1.6 }}>
+                    <strong>Step 1:</strong> Open the <strong>Workspace</strong> panel (top right) and download a local AI model.<br/>
+                    <strong>Recommended for your hardware:</strong> Qwen 2.5 0.5B (Light) — fastest, works on low-end hardware.<br/>
+                    <strong>Step 2:</strong> Upload your SMSF documents using the <strong>+</strong> button below.<br/>
+                    <strong>Step 3:</strong> Ask questions — Auto will cross-reference with page citations.
+                  </div>
+                )}
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {msgs.map((m, i) => {
                 return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "content" }}>
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "layout style" }}>
                     {m.role === "assistant" && (
                       <img
                         src="./Expressions/Happy.png"
@@ -2044,7 +2171,7 @@ ${chatHtml}
                       />
                     )}
                     <div style={{ background: m.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
-                      {m.role === "assistant" ? <Md text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
+                      {m.role === "assistant" ? <MemoMd text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
                       {m.role === "assistant" && (
                         <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
                           <button onClick={() => { try { navigator.clipboard.writeText(m.content); } catch {} }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.15)", color: "var(--dm)", cursor: "pointer", fontSize: "9px", padding: "2px 6px", borderRadius: "3px", fontFamily: "var(--m)" }}>Copy</button>
@@ -2059,7 +2186,7 @@ ${chatHtml}
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <Md text={streamingText} />
+                    <MemoMd text={streamingText} />
                   </div>
                 </div>
               )}
@@ -2105,7 +2232,8 @@ ${chatHtml}
                   }}>
                     <span style={{ flexShrink: 0, fontSize: "12px" }}>{att.isPdf ? "\uD83D\uDCDA" : att.isImage ? "\uD83D\uDDBC" : "\uD83D\uDCC4"}</span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{att.name}</span>
-                    {att.isPdf && <span style={{ fontSize: "8px", color: "var(--ac2)", flexShrink: 0 }}>{att.pageCount}pg</span>}
+                    {att._loading && <span style={{ fontSize: "8px", color: "#cc9955", flexShrink: 0, animation: "pulse 1.5s infinite" }}>extracting...</span>}
+                    {att.isPdf && !att._loading && <span style={{ fontSize: "8px", color: "var(--ac2)", flexShrink: 0 }}>{att.pageCount}pg</span>}
                     <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{att.size >= 1024*1024 ? (att.size / (1024*1024)).toFixed(1)+"MB" : (att.size / 1024).toFixed(0)+"KB"}</span>
                     {att.isPdf && (
                       <button
