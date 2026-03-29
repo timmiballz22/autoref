@@ -267,76 +267,91 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   const skipImages = pageCount > 200; // Don't render images for very large docs
 
   for (let i = 1; i <= pageCount; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    // Spatial-aware text extraction: preserve layout using pdf.js transform coordinates
-    const sortedItems = [...textContent.items].filter(item => item.str.trim()).sort((a, b) => {
-      const yDiff = b.transform[5] - a.transform[5]; // PDF y-axis is bottom-up
-      if (Math.abs(yDiff) > 5) return yDiff; // Different lines (5pt threshold)
-      return a.transform[4] - b.transform[4]; // Same line, sort left-to-right
-    });
-
-    // Group items into lines based on y-position proximity
-    let lines = [];
-    let currentLine = [];
-    let lastY = null;
-    for (const item of sortedItems) {
-      const y = item.transform[5];
-      if (lastY !== null && Math.abs(lastY - y) > 5) {
-        lines.push(currentLine);
-        currentLine = [];
-      }
-      currentLine.push(item);
-      lastY = y;
-    }
-    if (currentLine.length > 0) lines.push(currentLine);
-
-    // Reconstruct text with spacing awareness (tabs for columns, spaces for words)
-    const pageText = lines.map(line => {
-      let lineText = "";
-      let lastX = null;
-      let lastWidth = 0;
-      for (const item of line) {
-        const x = item.transform[4];
-        if (lastX !== null) {
-          const gap = x - (lastX + lastWidth);
-          if (gap > 15) lineText += "\t"; // Tab for large gaps (columns/tables)
-          else if (gap > 3) lineText += " ";
-        }
-        lineText += item.str;
-        lastX = x;
-        lastWidth = item.width || (item.str.length * 5);
-      }
-      return lineText;
-    }).join("\n").trim();
-
-    fullText += `\n\n=== [Page ${i}] ===\n`;
-
-    if (pageText.length > 30) {
-      // Enough text content — use extracted text with spatial layout preserved
-      fullText += pageText;
-    } else if (!skipImages && pageImages.length < MAX_PAGE_IMAGES) {
-      // Scanned/handwritten page — render to image (limited to first MAX_PAGE_IMAGES)
-      fullText += "(Scanned/handwritten page — see attached page image)";
+    try {
+      const page = await pdf.getPage(i);
+      let pageText = "";
       try {
-        const scale = 1.5; // ~150 DPI — 75% less memory than 3.0 scale
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement("canvas");
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        const ctx = canvas.getContext("2d");
-        await page.render({ canvasContext: ctx, viewport }).promise;
-        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
-        // Release canvas memory immediately
-        canvas.width = 0;
-        canvas.height = 0;
-      } catch (e) {
-        console.warn(`Failed to render page ${i} as image:`, e);
-        fullText += "\n(Could not render page image)";
+        const textContent = await page.getTextContent();
+        // Spatial-aware text extraction: preserve layout using pdf.js transform coordinates
+        const sortedItems = [...textContent.items].filter(item => item.str.trim()).sort((a, b) => {
+          const yDiff = b.transform[5] - a.transform[5]; // PDF y-axis is bottom-up
+          if (Math.abs(yDiff) > 5) return yDiff; // Different lines (5pt threshold)
+          return a.transform[4] - b.transform[4]; // Same line, sort left-to-right
+        });
+
+        // Group items into lines based on y-position proximity
+        let lines = [];
+        let currentLine = [];
+        let lastY = null;
+        for (const item of sortedItems) {
+          const y = item.transform[5];
+          if (lastY !== null && Math.abs(lastY - y) > 5) {
+            lines.push(currentLine);
+            currentLine = [];
+          }
+          currentLine.push(item);
+          lastY = y;
+        }
+        if (currentLine.length > 0) lines.push(currentLine);
+
+        // Reconstruct text with spacing awareness (tabs for columns, spaces for words)
+        pageText = lines.map(line => {
+          let lineText = "";
+          let lastX = null;
+          let lastWidth = 0;
+          for (const item of line) {
+            const x = item.transform[4];
+            if (lastX !== null) {
+              const gap = x - (lastX + lastWidth);
+              if (gap > 15) lineText += "\t"; // Tab for large gaps (columns/tables)
+              else if (gap > 3) lineText += " ";
+            }
+            lineText += item.str;
+            lastX = x;
+            lastWidth = item.width || (item.str.length * 5);
+          }
+          return lineText;
+        }).join("\n").trim();
+      } catch (textErr) {
+        console.warn(`Page ${i} text extraction failed (continuing):`, textErr);
+        pageText = "";
       }
-    } else {
-      // Scanned page but skip image rendering (too many or large document)
-      fullText += "(Scanned/handwritten page — text not extractable, image omitted to save memory)";
+
+      fullText += `\n\n=== [Page ${i}] ===\n`;
+
+      if (pageText.length > 30) {
+        // Enough text content — use extracted text with spatial layout preserved
+        fullText += pageText;
+      } else if (!skipImages && pageImages.length < MAX_PAGE_IMAGES) {
+        // Scanned/handwritten page — render to image (limited to first MAX_PAGE_IMAGES)
+        fullText += "(Scanned/handwritten page — see attached page image)";
+        try {
+          const scale = 1.5; // ~150 DPI — 75% less memory than 3.0 scale
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement("canvas");
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext("2d");
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
+          // Release canvas memory immediately
+          canvas.width = 0;
+          canvas.height = 0;
+        } catch (e) {
+          console.warn(`Failed to render page ${i} as image:`, e);
+          fullText += "\n(Could not render page image)";
+        }
+      } else {
+        // Scanned page but skip image rendering (too many or large document)
+        fullText += "(Scanned/handwritten page — text not extractable, image omitted to save memory)";
+      }
+
+      // Clean up page reference
+      try { page.cleanup(); } catch (_) {}
+    } catch (pageErr) {
+      // Per-page error recovery: log and continue — never let one bad page kill the whole extraction
+      console.warn(`Page ${i} failed entirely (skipping):`, pageErr);
+      fullText += `\n\n=== [Page ${i}] ===\n(Page could not be processed — may be corrupted or encrypted)`;
     }
 
     // Yield to UI thread every BATCH_SIZE pages and report progress
@@ -344,56 +359,40 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
       if (onProgress) onProgress(i, pageCount);
       await new Promise(r => setTimeout(r, 0));
     }
-    // Clean up page reference
-    page.cleanup();
   }
 
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
-// ─── Web Search via DuckDuckGo Instant Answer API ───
-// Used by Reviewer agents to research topics on the web.
+// ─── Web Search — DISABLED for privacy ───
+// All processing is fully offline. No queries are sent to any external server.
+// This prevents any SMSF document content, user queries, or sensitive financial
+// data from being leaked to DuckDuckGo or any other third-party service.
 async function searchWeb(query) {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
-  const data = await resp.json();
-
-  const lines = [];
-  if (data.AbstractText) {
-    lines.push(`Summary: ${data.AbstractText}`);
-    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
-  }
-  if (data.Answer) lines.push(`Direct answer: ${data.Answer}`);
-  if (data.RelatedTopics?.length) {
-    lines.push("Related topics:");
-    for (const topic of data.RelatedTopics.slice(0, 6)) {
-      if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
-      // Handle sub-topics
-      if (topic.Topics) {
-        for (const sub of topic.Topics.slice(0, 3)) {
-          if (sub.Text) lines.push(`    • ${sub.Text}`);
-        }
-      }
-    }
-  }
-  if (data.Results?.length) {
-    lines.push("Results:");
-    for (const r of data.Results.slice(0, 3)) {
-      if (r.Text) lines.push(`  - ${r.Text}${r.FirstURL ? ` (${r.FirstURL})` : ""}`);
-    }
-  }
-  return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
+  return "Web search is disabled to protect your privacy. All analysis is performed offline using your local AI model and uploaded documents only. No data leaves your device.";
 }
 
 // ─── Document Indexing for 1000+ page PDFs ───
 // Builds a compact Table of Contents from extracted PDF text
+// Capped to prevent massive TOC strings from blowing the context window
 function buildDocIndex(docText, pageCount) {
   const pages = docText.split(/=== \[Page \d+\] ===/);
   const toc = [];
+  // For massive documents (500+ pages), only include first 150 + last 20 pages in TOC
+  // This prevents a 1000-page TOC from consuming 50K+ tokens
+  const MAX_TOC_FRONT = 150;
+  const MAX_TOC_BACK = 20;
+  const needsTruncation = pageCount > (MAX_TOC_FRONT + MAX_TOC_BACK);
+
   for (let i = 1; i < pages.length && i <= pageCount; i++) {
+    if (needsTruncation && i > MAX_TOC_FRONT && i <= pageCount - MAX_TOC_BACK) {
+      if (i === MAX_TOC_FRONT + 1) {
+        toc.push(`... (pages ${MAX_TOC_FRONT + 1}-${pageCount - MAX_TOC_BACK} omitted from TOC — content still available for citation) ...`);
+      }
+      continue;
+    }
     const pageContent = (pages[i] || "").trim();
-    const preview = pageContent.slice(0, 150).replace(/\s+/g, " ").trim();
+    const preview = pageContent.slice(0, 120).replace(/\s+/g, " ").trim();
     if (preview) toc.push(`Page ${i}: ${preview}...`);
     else toc.push(`Page ${i}: (empty or scanned page)`);
   }
@@ -401,15 +400,21 @@ function buildDocIndex(docText, pageCount) {
 }
 
 // Extracts text for specific page range from a document's full text
+// Safety limit prevents memory explosion on massive documents
 function getDocPages(docText, startPage, endPage) {
   const parts = [];
+  const MAX_CHARS_PER_PAGE = 8000; // ~2500 tokens per page max — prevents runaway memory
   for (let p = startPage; p <= endPage; p++) {
     const marker = `=== [Page ${p}] ===`;
     const nextMarker = `=== [Page ${p + 1}] ===`;
     const startIdx = docText.indexOf(marker);
     if (startIdx < 0) continue;
     const endIdx = docText.indexOf(nextMarker, startIdx);
-    parts.push(docText.slice(startIdx, endIdx > startIdx ? endIdx : undefined).trim());
+    let pageSlice = docText.slice(startIdx, endIdx > startIdx ? endIdx : startIdx + MAX_CHARS_PER_PAGE).trim();
+    if (pageSlice.length > MAX_CHARS_PER_PAGE) {
+      pageSlice = pageSlice.slice(0, MAX_CHARS_PER_PAGE) + "\n[Page content truncated to save memory]";
+    }
+    parts.push(pageSlice);
   }
   return parts.join("\n\n");
 }
@@ -1011,10 +1016,13 @@ function Auto() {
               setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
             });
             setActivityStatus("");
-            // Replace loading placeholder with real extracted content
+            // Replace loading placeholder — store only a SHORT preview in the attachment chip
+            // Full text is stored in pdfDocs (used by buildSystem for AI context)
+            // This prevents doubling memory usage for 1000+ page documents
+            const preview = text.slice(0, 2000) + (text.length > 2000 ? "\n...(full text available in SMSF Documents panel)" : "");
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
-                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
+                ? { name: file.name, type: "application/pdf", content: preview, size: file.size, isPdf: true, pageCount, pageImages: [] }
                 : att
             ));
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
@@ -1195,9 +1203,11 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
-    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
+    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Aspire 5) ───
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    // Tighter cap for small models (40%) vs large models (50%) — leaves more room for chat + generation
+    const isSmallModelCap = modelDefCap && modelDefCap.contextWindow <= 32768;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * (isSmallModelCap ? 0.40 : 0.50)) : 12000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -1400,7 +1410,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         if (att.isImage) {
           attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
         } else {
-          const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
+          const preview = (att.content || "").slice(0, 3000); // Compact preview — full text is in system prompt via pdfDocs
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1435,98 +1445,18 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
+      const MAX_MSGS = 12; // Aggressive cap for weak hardware — prevents context overflow and OOM
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
-        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
-Respond ONLY with valid JSON in this exact format (no other text):
-{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
-or
-{"needs_research": false, "questions": []}
-
-Rules:
-- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
-- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
-- If true, provide 2–3 specific, searchable questions (max 3)
-- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
-
-        const planningMsgs = [
-          { role: "system", content: planningSystem },
-          { role: "user", content: `User question: "${txt || "See attached files"}"` },
-        ];
-
-        try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
-          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-          const planRaw = extractRaw(planData);
-          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const plan = JSON.parse(jsonMatch[0]);
-            if (plan.needs_research && Array.isArray(plan.questions)) {
-              researchQuestions = plan.questions.slice(0, 3);
-            }
-          }
-        } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
-        }
-      }
-
-      // ─── Abort check ───
-      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
-      const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
-
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      // ─── STEP 1: Main agent response (with STREAMING) ───
+      // Pipeline optimised for weak hardware: no planning step, no web research (privacy),
+      // straight to main response. Web search disabled to prevent data leakage.
+      setActivityStatus("Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
-      let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
-      }
+      const mainSystem = buildSystem();
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
@@ -1539,8 +1469,9 @@ Rules:
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
       const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware (Aspire 5 / iGPU)
+      // 200ms interval reduces rendering pressure vs 120ms — smoother on low-end hardware
+      const streamThrottle = createStreamThrottle(setStreamingText, 200);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -1557,15 +1488,17 @@ Rules:
       // Save checkpoint — if reflection crashes, we still have the main response
       checkpointRaw = mainRaw;
 
-      // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
+      // ─── STEP 2: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
+      // This is the core quality feature — ensures accuracy, citations, and cross-referencing
       // Uses reduced maxTokens to prevent OOM on weak hardware
       let refinedRaw = mainRaw;
       // Preserve the original memory_update in case reflection loses it
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
+      // Adaptive: 2 passes for document queries on large models, 1 pass otherwise
+      // Small models (Qwen 0.5B) get 1 pass to avoid OOM and excessive wait times
+      const REFLECTION_PASSES = (hasDocuments && !isSmallModel) ? 2 : 1;
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
@@ -1589,7 +1522,7 @@ Your task: Review the draft response below and IMPROVE it based on this specific
 Context:
 - The user asked: "${txt || "See attached files"}"
 - The response should be an expert SMSF cross-referencing analysis with perfect page citations
-${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
+- All analysis is offline — no web research was conducted (privacy mode)
 ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
 
 Rules:
@@ -1606,15 +1539,12 @@ Rules:
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          // No streaming during reflection — reduces rendering overhead on weak hardware
+          // User sees status text ("Self-review pass N/N") instead
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
             timeoutMs: 120000,
-            onChunk: (partial) => reflectThrottle.update(partial),
           });
-          reflectThrottle.flush();
-          setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
           // Sanity check: keep memory_update tag integrity — never lose memory
@@ -1630,14 +1560,14 @@ Rules:
           checkpointRaw = refinedRaw;
         } catch (reflectErr) {
           console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
-          setStreamingText("");
-          // Continue with current refined version — don't crash
+          // Continue with current refined version — don't crash the pipeline
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 3: Verification — only for complex document queries on large models ───
+      // Skipped on small models (Qwen 0.5B) to prevent OOM and reduce response time
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModel) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -2181,12 +2111,13 @@ ${chatHtml}
                   </div>
                 );
               })}
-              {/* Streaming response display — shows text as it generates */}
+              {/* Streaming response display — lightweight pre-wrap to prevent lag on weak hardware */}
+              {/* Uses plain text during streaming instead of full markdown parsing (saves 100s of React elements per tick) */}
               {streamingText && busy && (
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
-                  <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                  <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", lineHeight: 1.7, fontFamily: "var(--f)", color: "var(--tx)" }}>
+                    {streamingText.replace(/<expression>[\s\S]*?<\/expression>/gi, "").replace(/<memory_update>[\s\S]*?<\/memory_update>/gi, "").trim()}
                   </div>
                 </div>
               )}
