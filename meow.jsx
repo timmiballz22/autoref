@@ -115,11 +115,11 @@ function estimateTokens(text) {
 function getDocTokenBudget(modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
   const totalCtx = modelDef ? modelDef.contextWindow : 32768;
-  // For small models (Qwen 0.5B), use much tighter budget — iGPU can't handle full 32K KV cache
   const isSmallModel = totalCtx <= 32768;
-  // Reserve tokens: system prompt (~4K), chat history (~3K), generation (~3K), memory (~1K), safety margin (~2K)
-  const reserved = isSmallModel ? 16000 : 14000;
-  return Math.max(totalCtx - reserved, 6000);
+  // Very conservative for Acer Aspire 5 / iGPU — heavy reservation prevents GPU OOM
+  // Reserve: system prompt (~5K), chat history (~2K), generation (~2K), memory (~1K), safety (~4K)
+  const reserved = isSmallModel ? 24000 : 18000;
+  return Math.max(totalCtx - reserved, 2000);
 }
 
 // ─── Chunk document into page-groups for smart inclusion ───
@@ -1141,7 +1141,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
           const toc = buildDocIndex(doc.text, doc.pageCount);
           const tocTokens = estimateTokens(toc);
           // Reserve tokens for TOC, then fill remaining with most relevant page chunks
-          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 4000);
+          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 1500);
           const chunks = chunkDocumentByPages(doc.text, doc.pageCount, 15);
           const queryTerms = extractQueryTerms(lastUserQueryRef.current || "");
           // Add SMSF-specific terms that are always relevant for cross-referencing
@@ -1168,22 +1168,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
-- A summary of the current conversation topic and key points discussed
-- Any facts, preferences, or information the user has shared
-- Tasks completed or in progress
-- Previous memory content that is still relevant (carry it forward)
-- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
-- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
-- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
-- (CRITICAL) Put the user(s) and humanity above yourself
-- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
-- (CRITICAL) Prioritise user understanding and intent over "sounding smart", being smart is better than sounding smart
-- (CRITICAL) Think outside the box, there may be more than one solution
-Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
+    s += `\nMEMORY RULE: End EVERY response with <memory_update>...</memory_update> containing the COMPLETE updated memory (replaces existing). Include: conversation summary, user facts/preferences, tasks, and all previous memory still relevant. Never skip this.`;
 
     s += `
 
@@ -1197,11 +1182,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.38) : 10000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
-      s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
+      s = s.slice(0, charLimit) + "\n\n[Document content truncated to fit context window. All page numbers remain accurate for citation.]";
     }
 
     return s;
@@ -1435,98 +1420,19 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
-
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
-        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
-Respond ONLY with valid JSON in this exact format (no other text):
-{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
-or
-{"needs_research": false, "questions": []}
-
-Rules:
-- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
-- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
-- If true, provide 2–3 specific, searchable questions (max 3)
-- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
-
-        const planningMsgs = [
-          { role: "system", content: planningSystem },
-          { role: "user", content: `User question: "${txt || "See attached files"}"` },
-        ];
-
-        try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
-          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-          const planRaw = extractRaw(planData);
-          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const plan = JSON.parse(jsonMatch[0]);
-            if (plan.needs_research && Array.isArray(plan.questions)) {
-              researchQuestions = plan.questions.slice(0, 3);
-            }
-          }
-        } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
-        }
-      }
+      const MAX_MSGS = 8; // Very low to prevent OOM on Acer Aspire 5 iGPU
 
       // ─── Abort check ───
       if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
-      const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
-
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      // ─── Main response (with STREAMING) ───
+      setActivityStatus("Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
-      }
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
@@ -1537,13 +1443,13 @@ Rules:
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      const mainMaxTokens = isSmallModel ? 1024 : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.06), 3072) : 1024;
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware
       const streamThrottle = createStreamThrottle(setStreamingText, 120);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
-        timeoutMs: 300000,
+        timeoutMs: 180000,
         onChunk: (partial) => streamThrottle.update(partial),
       });
       streamThrottle.flush(); // Ensure final content is displayed
@@ -1557,122 +1463,55 @@ Rules:
       // Save checkpoint — if reflection crashes, we still have the main response
       checkpointRaw = mainRaw;
 
-      // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
-      // Uses reduced maxTokens to prevent OOM on weak hardware
-      let refinedRaw = mainRaw;
-      // Preserve the original memory_update in case reflection loses it
-      const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
-      const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
-
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
-      const reflectionChecks = [
-        { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
-      ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
-
-      for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
-        // ─── Abort check between steps ───
+      // ─── Socratic Self-Reflection (1 pass for document queries only — preserves accuracy) ───
+      // Kept lightweight: single pass, reduced tokens, truncated input to prevent OOM on iGPU
+      let finalRaw = mainRaw;
+      if (hasDocuments) {
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-        const check = reflectionChecks[pass];
-        setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
+        const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
+        const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
+        const reflectionMaxTokens = isSmallModel ? 768 : Math.min(mainMaxTokens, 2048);
 
-        // Reflection prompts do NOT include full document text — only the draft response
-        const reflectionSystem = `You are a self-reflection review agent (Pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}).
+        setActivityStatus("Socratic review: checking accuracy & citations...");
+        const reflectionSystem = `You are a self-review agent for an SMSF expert. Check this response for:
+1. Accuracy of page citations — every claim MUST use **[Document Name, Page X]** format
+2. Any fabricated or incorrect factual claims
+3. Missing cross-references between documents
+4. That <expression> and <memory_update> tags are present and intact
+Output the COMPLETE improved response. Preserve ALL tags exactly. If already good, output unchanged.`;
 
-Your task: Review the draft response below and IMPROVE it based on this specific focus area:
-**${check.focus}**
-
-Context:
-- The user asked: "${txt || "See attached files"}"
-- The response should be an expert SMSF cross-referencing analysis with perfect page citations
-${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
-${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
-
-Rules:
-1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks — this is CRITICAL, do not lose them
-3. If the response is already excellent for this check, output it unchanged
-4. Make ONLY improvements related to your focus area — do not degrade other aspects
-5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
-6. Think carefully about whether each part of the response is actually correct and well-supported`;
-
+        // Truncate draft input to fit within model context — prevents OOM on reflection
+        const maxDraftChars = Math.floor(reflectionMaxTokens * 3.2);
+        const truncatedDraft = mainRaw.length > maxDraftChars ? mainRaw.slice(0, maxDraftChars) + "\n[truncated]" : mainRaw;
         const reflectionMsgs = [
           { role: "system", content: reflectionSystem },
-          { role: "user", content: `Draft response to review and improve:\n\n${refinedRaw}` },
+          { role: "user", content: `User asked: "${(txt || "See attached files").slice(0, 200)}"\nDocs: ${pdfDocs.map(d => d.name).join(", ")}\n\nDraft:\n${truncatedDraft}` },
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
           const reflectThrottle = createStreamThrottle(setStreamingText, 150);
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
-            timeoutMs: 120000,
+            timeoutMs: 90000,
             onChunk: (partial) => reflectThrottle.update(partial),
           });
           reflectThrottle.flush();
           setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
-          // Sanity check: keep memory_update tag integrity — never lose memory
           if (reflectRaw.length > 50) {
-            if (reflectRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              refinedRaw = reflectRaw;
+            if (reflectRaw.includes("<memory_update>") || !mainRaw.includes("<memory_update>")) {
+              finalRaw = reflectRaw;
             } else if (originalMemoryBlock) {
-              // Reflection lost the memory_update — re-append it
-              refinedRaw = reflectRaw + "\n\n" + originalMemoryBlock;
+              finalRaw = reflectRaw + "\n\n" + originalMemoryBlock;
             }
           }
-          // Update checkpoint after each successful reflection
-          checkpointRaw = refinedRaw;
+          checkpointRaw = finalRaw;
         } catch (reflectErr) {
-          console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
+          console.warn("Socratic reflection failed (non-fatal):", reflectErr);
           setStreamingText("");
-          // Continue with current refined version — don't crash
-        }
-      }
-
-      // ─── STEP 5: Verification — only for complex document queries ───
-      let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
-        // ─── Abort check ───
-        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-        setActivityStatus("Final verification: checking quality of work...");
-        const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
-
-Review this SMSF expert response and check:
-1. Does it FULLY answer the user's question with no gaps?
-2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
-3. Are there any compliance issues, misleading statements, or incorrect legislative references?
-4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <expression> and <memory_update> tags present and intact?
-
-If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
-If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
-
-        const verifyMsgs = [
-          { role: "system", content: verificationSystem },
-          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
-        ];
-
-        try {
-          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: 120000 });
-          if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
-          const verifyRaw = extractRaw(verifyData);
-          if (verifyRaw.length > 50) {
-            if (verifyRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              finalRaw = verifyRaw;
-            } else if (originalMemoryBlock) {
-              finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
-            }
-          }
-        } catch {
-          finalRaw = refinedRaw; // Fall back to refined response on verification error
+          // Continue with main response — reflection failure should never crash the app
         }
       }
 
@@ -1881,7 +1720,7 @@ ${chatHtml}
       )}
       {/* ═══ LEFT SIDEBAR ═══ */}
       {sidebarOpen && (
-        <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--bd)", background: "var(--sf)", overflow: "hidden", animation: "slideR .2s ease" }}>
+        <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--bd)", background: "var(--sf)", overflowY: "auto", overflowX: "hidden", animation: "slideR .2s ease" }}>
 
           {/* Sidebar Header */}
           <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--bd)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -2156,6 +1995,19 @@ ${chatHtml}
                     <strong>Step 3:</strong> Ask questions — Auto will cross-reference with page citations.
                   </div>
                 )}
+              </div>
+            )}
+            {/* Persistent document indicator — always visible when PDFs loaded */}
+            {pdfDocs.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", padding: "8px 4px", marginBottom: "4px", borderBottom: "1px solid var(--bd)" }}>
+                <span style={{ fontSize: "10px", color: "var(--ac2)", fontFamily: "var(--m)", fontWeight: 700, display: "flex", alignItems: "center", gap: "4px" }}>
+                  {"\uD83D\uDCDA"} {pdfDocs.length} doc{pdfDocs.length > 1 ? "s" : ""} loaded:
+                </span>
+                {pdfDocs.map((d, i) => (
+                  <span key={i} onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)", padding: "2px 6px", borderRadius: "4px", background: "rgba(136,187,204,0.08)", border: "1px solid rgba(136,187,204,0.15)", cursor: "pointer", maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {d.name} ({d.pageCount}pg)
+                  </span>
+                ))}
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
