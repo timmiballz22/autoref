@@ -355,7 +355,14 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
 // Used by Reviewer agents to research topics on the web.
 async function searchWeb(query) {
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
-  const resp = await fetch(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout to prevent hangs
+  let resp;
+  try {
+    resp = await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
   const data = await resp.json();
 
@@ -516,7 +523,7 @@ function il(t) {
 const MemoMd = React.memo(Md);
 
 // ─── PDF Viewer Component ───
-function PdfViewer({ pdfData, blobUrl, onClose }) {
+function PdfViewer({ blobUrl, onClose }) {
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
@@ -525,23 +532,15 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
   const [jumpPage, setJumpPage] = useState("");
 
   useEffect(() => {
-    if (!window.pdfjsLib) return;
-    // Support both legacy ArrayBuffer (pdfData) and new Blob URL (blobUrl)
-    const source = blobUrl || pdfData;
-    if (!source) return;
+    if (!window.pdfjsLib || !blobUrl) return;
     let cancelled = false;
     (async () => {
       try {
-        let loadSource;
-        if (blobUrl) {
-          // Fetch the Blob URL to get ArrayBuffer on-demand (lazy loading)
-          const resp = await fetch(blobUrl);
-          const buf = await resp.arrayBuffer();
-          loadSource = { data: buf };
-        } else {
-          loadSource = { data: pdfData };
-        }
-        const pdf = await pdfjsLib.getDocument(loadSource).promise;
+        // Fetch the Blob URL to get ArrayBuffer on-demand (lazy loading)
+        const resp = await fetch(blobUrl);
+        const buf = await resp.arrayBuffer();
+        if (cancelled) return;
+        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
         if (cancelled) return;
         pdfDocRef.current = pdf;
         setTotalPages(pdf.numPages);
@@ -551,7 +550,7 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [pdfData, blobUrl]);
+  }, [blobUrl]);
 
   useEffect(() => {
     if (!pdfDocRef.current || !canvasRef.current) return;
@@ -991,6 +990,15 @@ function Auto() {
     files.forEach(file => {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 
+      // Prevent duplicate uploads — same filename already attached or in pdfDocs
+      if (isPdf) {
+        const alreadyAttached = pdfDocs.some(d => d.name === file.name);
+        if (alreadyAttached) {
+          setErr(`"${file.name}" is already uploaded. Remove it first if you want to re-upload.`);
+          return;
+        }
+      }
+
       if (isPdf) {
         // PDF: show immediate placeholder chip so user sees the file was accepted
         const placeholderId = `pdf-loading-${Date.now()}-${file.name}`;
@@ -1028,6 +1036,11 @@ function Auto() {
             setAttachments(prev => prev.filter(att => att._id !== placeholderId));
           }
         };
+        reader.onerror = () => {
+          setErr(`Failed to read file "${file.name}". The file may be corrupted.`);
+          setActivityStatus("");
+          setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+        };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
         const reader = new FileReader();
@@ -1051,10 +1064,26 @@ function Auto() {
     });
     if (attachInputRef.current) attachInputRef.current.value = "";
     setAttachMenuOpen(false);
-  }, []); // No stale dependency on attachments — all checks use functional updates
+  }, [pdfDocs]); // pdfDocs needed for duplicate detection
 
   const removeAttachment = useCallback((index) => {
-    setAttachments(prev => prev.filter((_, i) => i !== index));
+    setAttachments(prev => {
+      const att = prev[index];
+      // If removing a PDF, also remove from pdfDocs and revoke its blob URL
+      if (att?.isPdf && att?.name) {
+        setPdfDocs(prevDocs => {
+          const idx = prevDocs.findIndex(d => d.name === att.name);
+          if (idx >= 0) {
+            if (prevDocs[idx].blobUrl) {
+              try { URL.revokeObjectURL(prevDocs[idx].blobUrl); } catch {}
+            }
+            return prevDocs.filter((_, i) => i !== idx);
+          }
+          return prevDocs;
+        });
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   // ─── System prompt builder ───
@@ -1459,7 +1488,7 @@ Rules:
         ];
 
         try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
+          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 15000 });
           if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
           const planRaw = extractRaw(planData);
           const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
@@ -1497,7 +1526,7 @@ Rules:
           ];
 
           try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
+            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 20000 });
             if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
             const findings = extractRaw(reviewerData);
             return { question, findings };
@@ -1540,10 +1569,10 @@ Rules:
       const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      const streamThrottle = createStreamThrottle(setStreamingText, 180);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
-        timeoutMs: 300000,
+        timeoutMs: 120000,
         onChunk: (partial) => streamThrottle.update(partial),
       });
       streamThrottle.flush(); // Ensure final content is displayed
@@ -1558,20 +1587,23 @@ Rules:
       checkpointRaw = mainRaw;
 
       // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
-      // Uses reduced maxTokens to prevent OOM on weak hardware
+      // Adaptive pass count: keeps accuracy high while being lighter on weak hardware
+      // Small models (Qwen 0.5B): 1 pass only (model is too small for multi-pass benefit)
+      // Larger models with documents: 2 passes (accuracy matters for cross-referencing)
+      // Larger models without documents: 1 pass
       let refinedRaw = mainRaw;
       // Preserve the original memory_update in case reflection loses it
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
+      const REFLECTION_PASSES = isSmallModel ? 1 : (hasDocuments ? 2 : 1);
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      // Reflection uses reduced maxTokens — tighter on small models to prevent OOM
+      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1024) : Math.min(mainMaxTokens, 3072);
+      const reflectionTimeoutMs = isSmallModel ? 60000 : 90000;
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1606,15 +1638,12 @@ Rules:
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          // NO streaming during reflection — saves UI render cycles on weak hardware
+          // User sees activity status instead, which is enough feedback
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
-            timeoutMs: 120000,
-            onChunk: (partial) => reflectThrottle.update(partial),
+            timeoutMs: reflectionTimeoutMs,
           });
-          reflectThrottle.flush();
-          setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
           // Sanity check: keep memory_update tag integrity — never lose memory
@@ -1630,14 +1659,15 @@ Rules:
           checkpointRaw = refinedRaw;
         } catch (reflectErr) {
           console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
-          setStreamingText("");
           // Continue with current refined version — don't crash
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 5: Verification — only for document queries on larger models ───
+      // Skip verification entirely for small models — they can't meaningfully verify their own work
+      // and the extra model call doubles response time on weak hardware
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModel) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -1661,7 +1691,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
         ];
 
         try {
-          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: 120000 });
+          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: reflectionTimeoutMs });
           if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
           const verifyRaw = extractRaw(verifyData);
           if (verifyRaw.length > 50) {
@@ -1741,7 +1771,17 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
     return "./Expressions/Happy.png";
   }, [isBlinking, busy, expression]);
 
-  const clearChat = () => { setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setErr(null); };
+  const clearChat = () => {
+    setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setErr(null);
+    // Clean up pdfDocs and revoke all blob URLs to prevent memory leaks
+    setPdfDocs(prev => {
+      for (const doc of prev) {
+        if (doc.blobUrl) { try { URL.revokeObjectURL(doc.blobUrl); } catch {} }
+      }
+      return [];
+    });
+    setAttachments([]);
+  };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ─── Export chat analysis as PDF ───
@@ -1818,7 +1858,11 @@ ${chatHtml}
     const printWin = window.open(url, "_blank");
     if (printWin) {
       printWin.onload = () => {
-        setTimeout(() => { printWin.print(); }, 500);
+        setTimeout(() => {
+          printWin.print();
+          // Revoke after print dialog — give browser time to finish using the blob
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        }, 500);
       };
     } else {
       // Fallback: download as HTML
@@ -1826,8 +1870,8 @@ ${chatHtml}
       a.href = url;
       a.download = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
       a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
     }
-    URL.revokeObjectURL(url);
   }, [msgs, pdfDocs, localModelId]);
 
   // ═══ RENDER ═══
@@ -1844,7 +1888,6 @@ ${chatHtml}
       {/* PDF Viewer Modal */}
       {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
         <PdfViewer
-          pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
           blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
           onClose={() => setPdfViewerOpen(false)}
         />
