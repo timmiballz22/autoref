@@ -255,7 +255,7 @@ async function saveChat(msgs) {
 }
 // ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
 // Optimised for 1000+ page documents: batched processing, lower scale, limited images
-const MAX_PAGE_IMAGES = 3; // Only render first 3 scanned pages as images to save memory
+const MAX_PAGE_IMAGES = 0; // Disabled — image rendering is the #1 OOM cause on weak iGPUs
 
 async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
@@ -264,7 +264,7 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   let fullText = "";
   const pageImages = [];
   const BATCH_SIZE = 10; // Yield to UI every 10 pages
-  const skipImages = pageCount > 200; // Don't render images for very large docs
+  const skipImages = true; // Always skip — scanned-page rendering OOMs weak hardware
 
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i);
@@ -351,39 +351,13 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
-// ─── Web Search via DuckDuckGo Instant Answer API ───
-// Used by Reviewer agents to research topics on the web.
-async function searchWeb(query) {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
-  const data = await resp.json();
-
-  const lines = [];
-  if (data.AbstractText) {
-    lines.push(`Summary: ${data.AbstractText}`);
-    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
-  }
-  if (data.Answer) lines.push(`Direct answer: ${data.Answer}`);
-  if (data.RelatedTopics?.length) {
-    lines.push("Related topics:");
-    for (const topic of data.RelatedTopics.slice(0, 6)) {
-      if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
-      // Handle sub-topics
-      if (topic.Topics) {
-        for (const sub of topic.Topics.slice(0, 3)) {
-          if (sub.Text) lines.push(`    • ${sub.Text}`);
-        }
-      }
-    }
-  }
-  if (data.Results?.length) {
-    lines.push("Results:");
-    for (const r of data.Results.slice(0, 3)) {
-      if (r.Text) lines.push(`  - ${r.Text}${r.FirstURL ? ` (${r.FirstURL})` : ""}`);
-    }
-  }
-  return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
+// ─── Web Search DISABLED ───
+// All web search has been removed to guarantee ZERO data leakage. Auto is 100%
+// offline — no network calls are made to any external server once the model is
+// cached. This function is retained as a stub so any stray references fail
+// safely without performing any network I/O.
+async function searchWeb(_query) {
+  return "Web search is disabled — Auto operates fully offline to protect your SMSF data.";
 }
 
 // ─── Document Indexing for 1000+ page PDFs ───
@@ -1400,7 +1374,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         if (att.isImage) {
           attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
         } else {
-          const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
+          const preview = (att.content || "").slice(0, 1500); // Short preview — full content is in <documents> block
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1435,11 +1409,15 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
+      const MAX_MSGS = 12; // Tight chat history window — weak hardware has very small KV cache budget
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
+      // ─── STEP 1: Planning — DISABLED ───
+      // Planning + DuckDuckGo research were removed: (a) they leaked data to an
+      // external server, (b) they ran extra LLM calls that destroyed latency on
+      // weak hardware. Auto is now fully offline and goes straight to the main
+      // answer + Socratic review.
       let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
+      if (false) {
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -1477,9 +1455,9 @@ Rules:
       // ─── Abort check ───
       if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
+      // ─── STEP 2: Reviewer agents — DISABLED (offline-only, no web fetches) ───
       const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
+      if (false && researchQuestions.length > 0) {
         setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
 
         const reviewerPromises = researchQuestions.map(async (question, i) => {
@@ -1537,7 +1515,9 @@ Rules:
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      // Weak-hardware safe: keep generation short enough that the KV cache never blows up.
+      // Small models (≤32K ctx) are capped at 1024 tokens out; larger models at 3072.
+      const mainMaxTokens = isSmallModel ? 1024 : (modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.06), 3072) : 1024);
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware
       const streamThrottle = createStreamThrottle(setStreamingText, 120);
@@ -1565,13 +1545,15 @@ Rules:
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
+      // Single Socratic pass only — combines accuracy, citations, and cross-referencing.
+      // Extra passes were removed because each pass on a weak iGPU adds 30–90s of lag
+      // and risks OOM. One well-targeted pass preserves review quality at a fraction of the cost.
+      const REFLECTION_PASSES = hasDocuments ? 1 : 0;
       const reflectionChecks = [
-        { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
+        { name: "Socratic Review — Accuracy, Citations & Cross-References", focus: "Check all factual claims, SIS Act/regulation references, dollar amounts, percentages, and dates. Verify EVERY document claim cites the document by name and page number in **[Document Name, Page X]** format. Cross-reference BETWEEN documents — flag discrepancies (e.g. trust deed vs investment strategy vs member statements). If any aspect of the user's question was missed, fill it in. Preserve <expression> and <memory_update> tags exactly." },
       ];
       // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1024) : Math.min(mainMaxTokens, 2048);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1635,9 +1617,9 @@ Rules:
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 5: Verification — DISABLED (merged into single Socratic pass above) ───
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (false) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -2218,6 +2200,31 @@ ${chatHtml}
 
           {/* INPUT */}
           <div style={{ padding: "10px 20px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
+            {/* Persistent loaded-document chips — always visible so the user can SEE their uploads */}
+            {pdfDocs.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "6px", padding: "4px 0", alignItems: "center" }}>
+                <span style={{ fontSize: "10px", color: "var(--ac2)", fontFamily: "var(--m)", fontWeight: 700 }}>{"\uD83D\uDCDA"} Loaded:</span>
+                {pdfDocs.map((doc, i) => (
+                  <div key={"loaded-"+i} style={{
+                    display: "flex", alignItems: "center", gap: "5px",
+                    padding: "3px 7px", borderRadius: "5px",
+                    background: "rgba(136,187,204,0.08)",
+                    border: "1px solid rgba(136,187,204,0.25)",
+                    fontSize: "10px", fontFamily: "var(--m)", color: "var(--ac2)",
+                    maxWidth: "220px",
+                  }} title={`${doc.name} — ${doc.pageCount} pages`}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}
+                          onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }}>{doc.name}</span>
+                    <span style={{ fontSize: "8px", color: "var(--dm)" }}>{doc.pageCount}pg</span>
+                    <button
+                      onClick={() => setPdfDocs(prev => prev.filter((_, j) => j !== i))}
+                      style={{ background: "none", border: "none", color: "var(--dg)", cursor: "pointer", fontSize: "12px", padding: "0 2px", lineHeight: 1 }}
+                      title="Remove document"
+                    >&times;</button>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* Attachment preview chips */}
             {attachments.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px", padding: "4px 0" }}>
