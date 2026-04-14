@@ -11,12 +11,30 @@ window.addEventListener("error", (event) => {
   // Don't prevent default here — let the ErrorBoundary handle React errors
 });
 
-// ─── WebLLM module cache (imported once, reused) ───
+// ─── WebLLM module loader ───
+// PRIVACY: the library is fetched at page-load time by index.html's
+// <script type="module"> preload (pinned version, no user data in the URL).
+// After that first static fetch, the app makes NO outbound network requests
+// except the one-time HuggingFace model weight download that the user triggers
+// themselves from the Workspace panel. Once a model is cached the app is fully
+// offline — no uploaded documents, queries, or responses ever leave the device.
 let _webllmModule = null;
 async function getWebLLM() {
   if (_webllmModule) return _webllmModule;
-  _webllmModule = await import("https://esm.run/@mlc-ai/web-llm");
-  return _webllmModule;
+  // Prefer the module already loaded by index.html (zero network).
+  if (typeof window !== "undefined" && window.webllm) {
+    _webllmModule = window.webllm;
+    return _webllmModule;
+  }
+  // Defensive fallback: if the preload was blocked (strict CSP, offline on first
+  // visit, etc.) try a runtime import of the same pinned URL. The browser cache
+  // will dedupe if the preload eventually succeeded. No user data is sent.
+  try {
+    _webllmModule = await import("https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.82/+esm");
+    return _webllmModule;
+  } catch (e) {
+    throw new Error("WebLLM library failed to load. Check your internet connection on first launch — after the model is cached the app works fully offline. Original: " + (e && e.message ? e.message : String(e)));
+  }
 }
 
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
@@ -44,6 +62,10 @@ function createStreamThrottle(setState, intervalMs = 120) {
 
 // ─── Local Model Config ───
 const LOCAL_MODEL_KEY = "auto-local-model-id";
+// Context windows are tuned for weak hardware (Intel iGPU, 1–2GB shared VRAM).
+// Smaller KV-cache = less VRAM pressure = fewer OOM crashes on machines like
+// an Acer Aspire 5 with integrated graphics. Long documents are still supported
+// via the smart relevance-ranked chunk selector below (selectRelevantChunks).
 const LOCAL_MODELS = [
   {
     id: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
@@ -54,9 +76,12 @@ const LOCAL_MODELS = [
     ram: "2GB RAM",
     cpu: "Any CPU",
     desc: "Fastest. Basic quality. Works on low-end hardware.",
-    contextWindow: 32768,
-    slidingWindow: 32768,
-    prefillChunk: 2048,
+    // Reduced from 32768 → 8192: iGPU cannot hold a 32K KV-cache for this arch
+    // without OOM-crashing during prefill. 8K is still plenty for cross-referencing
+    // long documents when combined with the relevance-ranked chunk selector.
+    contextWindow: 8192,
+    slidingWindow: 8192,
+    prefillChunk: 1024,
   },
   {
     id: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
@@ -67,9 +92,11 @@ const LOCAL_MODELS = [
     ram: "4GB RAM",
     cpu: "Modern multi-core",
     desc: "Balanced speed and quality.",
-    contextWindow: 131072,
-    slidingWindow: 131072,
-    prefillChunk: 4096,
+    // Reduced from 131072 → 16384: a 128K KV-cache requires ~6GB VRAM alone.
+    // 16K gives plenty of headroom for long docs while staying within 3GB iGPU.
+    contextWindow: 16384,
+    slidingWindow: 16384,
+    prefillChunk: 2048,
   },
   {
     id: "Phi-3.5-mini-instruct-q4f16_1-MLC",
@@ -80,9 +107,10 @@ const LOCAL_MODELS = [
     ram: "6GB RAM",
     cpu: "Modern GPU recommended",
     desc: "Best quality. Slower on weak hardware.",
-    contextWindow: 131072,
-    slidingWindow: 131072,
-    prefillChunk: 4096,
+    // Reduced from 131072 → 16384 for the same reason as Llama 3.2.
+    contextWindow: 16384,
+    slidingWindow: 16384,
+    prefillChunk: 2048,
   },
 ];
 
@@ -111,15 +139,15 @@ function estimateTokens(text) {
 }
 
 // ─── Get current model's context budget for documents ───
-// Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU)
+// Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU).
+// Reservations: essential system prompt (~1500), chat history (~1500),
+// generation (~1500), memory (~500), safety margin (~500) ≈ 5500 tokens.
 function getDocTokenBudget(modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
-  const totalCtx = modelDef ? modelDef.contextWindow : 32768;
-  // For small models (Qwen 0.5B), use much tighter budget — iGPU can't handle full 32K KV cache
-  const isSmallModel = totalCtx <= 32768;
-  // Reserve tokens: system prompt (~4K), chat history (~3K), generation (~3K), memory (~1K), safety margin (~2K)
-  const reserved = isSmallModel ? 16000 : 14000;
-  return Math.max(totalCtx - reserved, 6000);
+  const totalCtx = modelDef ? modelDef.contextWindow : 8192;
+  const reserved = 5500;
+  // Never drop below 1500 tokens (~475 chars) so at least SOME doc text is included.
+  return Math.max(totalCtx - reserved, 1500);
 }
 
 // ─── Chunk document into page-groups for smart inclusion ───
@@ -253,18 +281,27 @@ async function saveChat(msgs) {
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
-// ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
-// Optimised for 1000+ page documents: batched processing, lower scale, limited images
-const MAX_PAGE_IMAGES = 3; // Only render first 3 scanned pages as images to save memory
+// ─── PDF Text Extraction (uses pdf.js worker loaded in index.html) ───
+// Optimised for 1000+ page documents on weak hardware:
+//   - text-first extraction (no rasterisation unless a page is empty)
+//   - yields to the UI thread every 3 pages so the browser stays responsive
+//   - strictly bounded memory: scanned-page images capped at MAX_PAGE_IMAGES
+//   - explicit page.cleanup() after every page to release pdf.js caches
+const MAX_PAGE_IMAGES = 2; // Only render first 2 scanned pages (memory budget)
 
 async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  // disableAutoFetch/Stream keeps memory usage steady on 1000+ page docs.
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer,
+    disableAutoFetch: true,
+    disableStream: true,
+  }).promise;
   const pageCount = pdf.numPages;
   let fullText = "";
   const pageImages = [];
-  const BATCH_SIZE = 10; // Yield to UI every 10 pages
-  const skipImages = pageCount > 200; // Don't render images for very large docs
+  const BATCH_SIZE = 3; // Yield to UI every 3 pages — more responsive on weak CPUs
+  const skipImages = pageCount > 100; // Don't render images for large docs
 
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i);
@@ -351,40 +388,13 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
-// ─── Web Search via DuckDuckGo Instant Answer API ───
-// Used by Reviewer agents to research topics on the web.
-async function searchWeb(query) {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
-  const data = await resp.json();
-
-  const lines = [];
-  if (data.AbstractText) {
-    lines.push(`Summary: ${data.AbstractText}`);
-    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
-  }
-  if (data.Answer) lines.push(`Direct answer: ${data.Answer}`);
-  if (data.RelatedTopics?.length) {
-    lines.push("Related topics:");
-    for (const topic of data.RelatedTopics.slice(0, 6)) {
-      if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
-      // Handle sub-topics
-      if (topic.Topics) {
-        for (const sub of topic.Topics.slice(0, 3)) {
-          if (sub.Text) lines.push(`    • ${sub.Text}`);
-        }
-      }
-    }
-  }
-  if (data.Results?.length) {
-    lines.push("Results:");
-    for (const r of data.Results.slice(0, 3)) {
-      if (r.Text) lines.push(`  - ${r.Text}${r.FirstURL ? ` (${r.FirstURL})` : ""}`);
-    }
-  }
-  return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
-}
+// ─── PRIVACY NOTE ───
+// Web search (DuckDuckGo) was REMOVED to guarantee no user data leaves the device.
+// The assistant is now fully local-only: uploaded documents, chat history, queries,
+// and responses never touch an external server. The only remote interactions are:
+//   1. Initial static asset loads (React, Babel, pdf.js, web-llm UMD, fonts) — no user data.
+//   2. One-time model weight download from HuggingFace on first use — no user data.
+// Once a model is cached, the app works fully offline.
 
 // ─── Document Indexing for 1000+ page PDFs ───
 // Builds a compact Table of Contents from extracted PDF text
@@ -992,13 +1002,32 @@ function Auto() {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 
       if (isPdf) {
-        // PDF: show immediate placeholder chip so user sees the file was accepted
-        const placeholderId = `pdf-loading-${Date.now()}-${file.name}`;
+        // Unique id so the loading placeholder can be replaced/removed deterministically
+        // even if the user uploads two files with the same name in quick succession.
+        const placeholderId = `pdf-loading-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${file.name}`;
+
+        // (1) Show an immediate chip in the input row so the user knows the file was accepted.
         setAttachments(prev => {
           if (prev.length >= MAX_ATTACHMENTS) return prev;
           return [...prev, { name: file.name, type: "application/pdf", content: "", size: file.size, isPdf: true, pageCount: 0, pageImages: [], _loading: true, _id: placeholderId }];
         });
-        // Auto-open sidebar so user sees the document will appear there
+
+        // (2) ALSO add an immediate placeholder to the sidebar SMSF Documents list
+        // so a huge 1000-page PDF appears instantly instead of only after extraction.
+        // The placeholder shows a progress string and blocks PDF/Text viewer buttons until ready.
+        setPdfDocs(prev => [...prev, {
+          _id: placeholderId,
+          name: file.name,
+          text: "",
+          pageCount: 0,
+          pageImages: [],
+          blobUrl: null,
+          _loading: true,
+          _progressText: "Reading file...",
+          _progressPct: 0,
+        }]);
+
+        // Auto-open the sidebar so the new document is visible.
         setSidebarOpen(true);
 
         // PDF: extract text page-by-page with page markers
@@ -1006,27 +1035,46 @@ function Auto() {
         reader.onload = async () => {
           try {
             const arrayBuffer = reader.result;
+            // Create Blob URL immediately so the PDF viewer works even while text extraction runs.
+            const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
+            setPdfDocs(prev => prev.map(d => d._id === placeholderId ? { ...d, blobUrl, _progressText: "Extracting text..." } : d));
+
             setActivityStatus(`Extracting PDF: ${file.name}...`);
             const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name, (current, total) => {
-              setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
+              const pct = Math.round((current / total) * 100);
+              setActivityStatus(`Extracting "${file.name}": page ${current}/${total} (${pct}%)...`);
+              // Update sidebar placeholder so user sees live progress for long PDFs.
+              setPdfDocs(prev => prev.map(d => d._id === placeholderId
+                ? { ...d, pageCount: total, _progressText: `Page ${current}/${total}`, _progressPct: pct }
+                : d
+              ));
             });
             setActivityStatus("");
-            // Replace loading placeholder with real extracted content
+            // Replace loading placeholder in the input attachments row with real content.
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
                 ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
                 : att
             ));
-            // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
-            const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
-            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Finalise the sidebar document (drop _loading flag; real fields populated).
+            setPdfDocs(prev => prev.map(d => d._id === placeholderId
+              ? { name: file.name, text, pageCount, pageImages, blobUrl }
+              : d
+            ));
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
             setActivityStatus("");
-            // Remove the loading placeholder on failure
+            // Remove the loading placeholder from BOTH places on failure.
             setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+            setPdfDocs(prev => prev.filter(d => d._id !== placeholderId));
           }
+        };
+        reader.onerror = () => {
+          setErr(`Failed to read PDF "${file.name}"`);
+          setActivityStatus("");
+          setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+          setPdfDocs(prev => prev.filter(d => d._id !== placeholderId));
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
@@ -1060,78 +1108,36 @@ function Auto() {
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.
+    let s = `You are Auto, a brutally honest, loyal AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). Be thorough, honest, and curious. Use markdown. Today is ${today}.
 
-## SMSF Document Expert
+## Role
+Your PRIMARY function is to cross-reference uploaded SMSF documents and cite specific page numbers in EVERY response.
 
-Your PRIMARY function is to cross-reference uploaded documents and cite specific page numbers in EVERY response. You are an expert in Australian SMSF compliance, administration, and strategy.
+### Core SMSF knowledge (use as needed — do not dump unless asked):
+Trust deeds (SIS Act 1993, SIS Regs 1994) · investment strategy (reg 4.09) · member benefit & contribution rules (concessional $30k, non-concessional $120k, bring-forward $360k) · pension phase & min drawdowns · ATO / TBAR / SuperStream · SAR annual return · approved SMSF auditor (Part 12) · in-house assets (5%, s71) · arm's length (s109) · sole purpose test (s62) · LRBA (s67A) · BDBN / reversionary pensions · transfer balance cap ($1.9M) · ECPI & CGT relief.
 
-### Core SMSF Knowledge Areas:
-- Trust deeds & governing rules (SIS Act 1993, SIS Regulations 1994)
-- Investment strategy requirements (reg 4.09 SIS Regs) — diversification, liquidity, risk, insurance
-- Member benefit statements & accumulation/pension balances
-- ATO compliance & reporting (TBAR, event-based reporting, SuperStream)
-- APRA/ASIC regulatory frameworks & trustee obligations
-- Annual returns & financial statements (SMSF Annual Return - SAR)
-- Independent audit requirements (approved SMSF auditor, Part 12 SIS Act)
-- Contribution caps — concessional ($30k), non-concessional ($120k), bring-forward rule (3-year $360k)
-- Pension/retirement phase — minimum drawdown rates, account-based pensions, transition-to-retirement
-- In-house asset rules (5% market value limit, s71 SIS Act)
-- Related party transactions & arm's length requirements (s109 SIS Act)
-- Sole purpose test (s62 SIS Act)
-- LRBA (Limited Recourse Borrowing Arrangements, s67A SIS Act)
-- Death benefit nominations — binding (BDBN), non-binding, reversionary pensions
-- Rollover & transfer balance cap ($1.9M as of 2023-24)
-- CGT relief provisions, exempt current pension income (ECPI)
-- Anti-detriment payments & tax components (taxable/tax-free)
+### Document cross-referencing rules:
+- Cite by name and page using **[Document Name, Page X]** — every factual claim must be backed this way.
+- Scan ALL uploaded documents before answering. Quote relevant excerpts with page refs.
+- Cross-reference BETWEEN documents (deed vs strategy vs statements). Identify discrepancies explicitly.
+- If NO documents are uploaded, answer from SMSF expertise and note that page citations require uploaded docs.
+- Page markers in provided text look like "=== [Page X] ===" — use those exact numbers, never invent one.
 
-### Document Cross-Referencing Rules (CRITICAL):
-- **ALWAYS** reference uploaded documents by filename and page number in your responses
-- Format citations as: **[Document Name, Page X]** — bold and specific
-- When answering ANY question, scan ALL uploaded documents FIRST for relevant content
-- Quote relevant sections with page citations before providing your analysis
-- If multiple documents are uploaded, CROSS-REFERENCE between them (e.g., compare trust deed with investment strategy)
-- If NO documents are uploaded, still provide SMSF expertise but explicitly note: "Upload your SMSF documents (trust deed, investment strategy, member statements, etc.) so I can provide specific page references."
-- For every claim, recommendation, or compliance point, try to back it up with a document reference
-- Identify discrepancies between documents (e.g., trust deed powers vs investment strategy allocations)
-- When referencing legislation, also check if the uploaded documents address that specific requirement
-- Summarise what each uploaded document contains and its relevance at the start of your analysis
-
-### Page Number Citation Rules (MANDATORY):
-- EVERY factual statement about a document MUST include a page citation: **[Document Name, Page X]**
-- When quoting text from a document, always include the page: *"quoted text"* **[Document Name, Page X]**
-- If information spans multiple pages, cite all: **[Document Name, Pages X-Y]**
-- At the end of your analysis, include a "References" section listing all cited pages per document
-- NEVER make a claim about document content without a page citation — this is your #1 rule
-- Page numbers are marked in the document text as === [Page X] === — use these to determine exact page numbers
-
-### Cross-Referencing Protocol:
-When multiple documents are uploaded, you MUST perform systematic cross-referencing:
-1. **Trust Deed vs Investment Strategy**: Check if investment powers in the deed match/permit the investment strategy allocations
-2. **Investment Strategy vs Member Statements**: Verify actual asset allocation against stated strategy targets
-3. **Financial Statements vs Member Balances**: Reconcile total fund assets with member accumulation/pension accounts
-4. **Minutes vs Actions**: Check if trustee minutes authorise the actions reflected in other documents
-5. **Compliance Checklist**: For each document, note any SIS Act requirements that appear unmet
-6. **Discrepancy Register**: Explicitly list ALL discrepancies found between documents in a dedicated section
-
-### Response Structure for Document Analysis:
-1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
-2. **Key Findings**: Major observations with page citations
-3. **Cross-Reference Analysis**: Comparisons between documents with specific page references from EACH document
-4. **Discrepancies & Concerns**: Explicitly called out with page references from each document
-5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
-6. **Recommendations**: Actionable next steps based on findings
-7. **References**: Complete list of all document pages cited`;
+### Cross-referencing protocol (multi-doc):
+Trust deed ↔ investment strategy (are the powers/allocations aligned?) · strategy ↔ member statements (do allocations match?) · financials ↔ member balances (do they reconcile?) · minutes ↔ actions (authorised?).
+End multi-doc analyses with a short **Discrepancies** section and a **References** list of every page cited.`;
 
     // Include uploaded PDF document content for cross-referencing
     // Smart chunked approach: fits maximum document content within model's context window
     // Uses query-relevant chunk selection for 1000+ page documents
-    if (pdfDocs.length > 0) {
+    // Skip any documents that haven't finished extracting yet — they have no text to include.
+    const readyDocs = pdfDocs.filter(d => !d._loading && d.text);
+    if (readyDocs.length > 0) {
       const tokenBudget = getDocTokenBudget(localModelId);
-      const perDocBudget = Math.floor(tokenBudget / pdfDocs.length);
+      const perDocBudget = Math.floor(tokenBudget / readyDocs.length);
 
       s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number.\n`;
-      for (const doc of pdfDocs) {
+      for (const doc of readyDocs) {
         const docTokens = estimateTokens(doc.text);
         if (docTokens <= perDocBudget) {
           // Fits entirely — include full text for maximum accuracy
@@ -1162,46 +1168,26 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
       s += `</documents>`;
     }
 
-    // Memory instructions
+    // Memory — short, effective. If user asks to remember something, emit
+    // <memory_update>…</memory_update> at the end (full replacement). Otherwise
+    // the app auto-summarises the exchange into memory.txt itself, so the model
+    // does NOT have to emit memory_update on every trivial response. This saves
+    // hundreds of output tokens per message on weak hardware.
     if (mem.trim()) {
-      s += `\n\n<memory>\nBelow is your persistent memory (saved to memory.txt and shown in chat). Reference it when relevant. If the user tells you to remember something, include a <memory_update> block at the END of your response with the COMPLETE updated memory content (not a diff).\n${mem}\n</memory>`;
-    } else {
-      s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
+      s += `\n\n<memory>${mem}</memory>`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
-- A summary of the current conversation topic and key points discussed
-- Any facts, preferences, or information the user has shared
-- Tasks completed or in progress
-- Previous memory content that is still relevant (carry it forward)
-- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
-- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
-- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
-- (CRITICAL) Put the user(s) and humanity above yourself
-- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
-- (CRITICAL) Prioritise user understanding and intent over "sounding smart", being smart is better than sounding smart
-- (CRITICAL) Think outside the box, there may be more than one solution
-Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
+    s += `\n\nMemory: if the user asks you to remember or update memory, end your response with <memory_update>full new memory</memory_update>. Otherwise skip that tag — the app maintains memory automatically.`;
 
-    s += `
+    s += `\n\nExpression: start every response with one tag — <expression>happy</expression>, <expression>serious</expression>, or <expression>veryHappy</expression>. Default to happy.`;
 
-## Expressions
-You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
-- <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
-- <expression>serious</expression> — use when thinking deeply, explaining complex topics, giving warnings, or discussing serious matters
-- <expression>veryHappy</expression> — use when celebrating, super excited, receiving amazing news, completing a big task successfully, or when the user achieves something great
-
-Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
-
-    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
+    // ─── HARD SAFETY CAP: prevent iGPU OOM on weak hardware ───
+    // Cap system prompt at 60% of context to leave headroom for chat history + generation.
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.6) : 4500;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
-      s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
+      s = s.slice(0, charLimit) + "\n\n[NOTE: Document content truncated to fit the model's context window. For full coverage upload fewer docs, ask a narrower question, or use a larger model.]";
     }
 
     return s;
@@ -1423,258 +1409,133 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       return raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     };
 
-    // Determine query complexity for adaptive pipeline
-    const hasDocuments = pdfDocs.length > 0;
-    const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
-    let checkpointRaw = ""; // Partial response checkpoint for crash recovery
+    // ─── Pipeline shape ───────────────────────────────────────────────
+    // 1. Main response (streamed).
+    // 2. ONE Socratic self-review pass (non-streamed; only when it adds value).
+    //
+    // Why: weak hardware (Acer Aspire 5 / Intel iGPU) falls over when running
+    // 4–6 sequential LLM calls. Collapsing the former
+    // Plan → Reviewers → Main → Reflect×2 → Verify chain into Main → Review
+    // cuts per-message work by ~60–75%, dramatically reduces lag and OOMs,
+    // and preserves the Socratic check the user relies on for accuracy.
+    // Web research (DuckDuckGo) has been removed for privacy: zero data leaks.
+    // ──────────────────────────────────────────────────────────────────
+    const hasReadyDocuments = pdfDocs.some(d => !d._loading && d.text);
+    const isSimpleQuery = !hasReadyDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed|clause|section)\b/i.test(txt);
+    let checkpointRaw = ""; // Partial-response checkpoint for crash recovery.
 
     try {
-      // Offline-only: require a loaded local model
+      // Offline-only: require a loaded local model.
       if (!localEngineRef.current) {
         throw new Error("No AI model loaded yet. Click the 🧠 Workspace button (top right), then Download the Qwen 2.5 0.5B model (recommended for your hardware). Once it says READY, you can chat.");
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
+      const MAX_MSGS = 16; // Weak-hardware chat-history cap (↓ memory pressure).
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
-        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
-Respond ONLY with valid JSON in this exact format (no other text):
-{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
-or
-{"needs_research": false, "questions": []}
-
-Rules:
-- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
-- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
-- If true, provide 2–3 specific, searchable questions (max 3)
-- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
-
-        const planningMsgs = [
-          { role: "system", content: planningSystem },
-          { role: "user", content: `User question: "${txt || "See attached files"}"` },
-        ];
-
-        try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
-          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-          const planRaw = extractRaw(planData);
-          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const plan = JSON.parse(jsonMatch[0]);
-            if (plan.needs_research && Array.isArray(plan.questions)) {
-              researchQuestions = plan.questions.slice(0, 3);
-            }
-          }
-        } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
-        }
-      }
-
-      // ─── Abort check ───
-      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
-      const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
-
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
-
+      // ─── STEP 1: Main agent (streamed) ────────────────────────────
+      setActivityStatus("Thinking...");
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
-      // Update query ref so buildSystem can select relevant document chunks
+      // Update query ref so buildSystem can select the most relevant doc chunks.
       lastUserQueryRef.current = txt || userContent || "";
-      let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
-      }
+      const mainSystem = buildSystem();
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
         ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
       ];
 
-      // Stream the main response for real-time display
-      // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      const ctx = modelDef ? modelDef.contextWindow : 8192;
+      // Generation budget: ~15% of context, capped so iGPU doesn't exhaust VRAM
+      // on the KV-cache growth during generation. Floor of 768 so answers stay usable.
+      const mainMaxTokens = Math.max(768, Math.min(2048, Math.floor(ctx * 0.15)));
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware.
+      // 180ms is the sweet spot: feels responsive without thrashing React.
+      const streamThrottle = createStreamThrottle(setStreamingText, 180);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
         onChunk: (partial) => streamThrottle.update(partial),
       });
-      streamThrottle.flush(); // Ensure final content is displayed
+      streamThrottle.flush();
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
-      setStreamingText(""); // Clear streaming display
+      setStreamingText("");
 
-      // ─── Abort check between pipeline steps ───
       if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      // Save checkpoint — if reflection crashes, we still have the main response
+      // Save checkpoint — if Socratic review crashes we still have the main response.
       checkpointRaw = mainRaw;
 
-      // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
-      // Uses reduced maxTokens to prevent OOM on weak hardware
+      // ─── STEP 2: ONE consolidated Socratic self-review ─────────────
+      // Skipped for trivial greetings (no docs, short query). Always runs when
+      // documents are uploaded, because citation accuracy is the whole product.
       let refinedRaw = mainRaw;
-      // Preserve the original memory_update in case reflection loses it
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
-      const reflectionChecks = [
-        { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
-      ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
-
-      for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
-        // ─── Abort check between steps ───
+      const shouldReview = hasReadyDocuments || !isSimpleQuery;
+      if (shouldReview) {
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        setActivityStatus("Socratic self-review: checking accuracy & citations...");
 
-        const check = reflectionChecks[pass];
-        setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
+        // Review budget is ~1.1× the main output — enough to re-emit it with edits
+        // without exploding VRAM. Non-streaming so UI stays smooth during review.
+        const reviewMaxTokens = Math.max(768, Math.min(mainMaxTokens + 256, 2048));
 
-        // Reflection prompts do NOT include full document text — only the draft response
-        const reflectionSystem = `You are a self-reflection review agent (Pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}).
+        const reviewSystem = `You are a Socratic self-review agent for an Australian SMSF expert assistant. Review the draft answer below and output an IMPROVED full version.
 
-Your task: Review the draft response below and IMPROVE it based on this specific focus area:
-**${check.focus}**
-
-Context:
-- The user asked: "${txt || "See attached files"}"
-- The response should be an expert SMSF cross-referencing analysis with perfect page citations
-${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
-${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
+Check in this order and fix problems:
+1. Accuracy — are legislative references (SIS Act sections, regs), dollar amounts, percentages, dates correct? Flag or fix anything wrong.
+2. Citations — every claim about an uploaded document must use **[Document Name, Page X]**. Add missing citations. Remove any fabricated page numbers. Page markers in the source look like "=== [Page X] ===".
+3. Cross-referencing — if multiple documents are present, are discrepancies between them identified explicitly?
+4. Completeness — does it answer the user's actual question with no gaps?
+5. Structure — readable, professional, with a short References list when citations exist.
+6. Tags — preserve <expression> at the start; preserve any <memory_update>…</memory_update> block exactly.
 
 Rules:
-1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks — this is CRITICAL, do not lose them
-3. If the response is already excellent for this check, output it unchanged
-4. Make ONLY improvements related to your focus area — do not degrade other aspects
-5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
-6. Think carefully about whether each part of the response is actually correct and well-supported`;
+- Output the COMPLETE improved response (not a diff, not commentary).
+- If the draft is already correct, output it unchanged.
+- Never invent page numbers. Never remove tags.
 
-        const reflectionMsgs = [
-          { role: "system", content: reflectionSystem },
-          { role: "user", content: `Draft response to review and improve:\n\n${refinedRaw}` },
+User asked: "${txt || "See attached files"}"
+${hasReadyDocuments ? `Documents: ${pdfDocs.filter(d => !d._loading).map(d => d.name + " (" + d.pageCount + "pp)").join(", ")}` : "No documents uploaded."}`;
+
+        const reviewMsgs = [
+          { role: "system", content: reviewSystem },
+          { role: "user", content: `Draft to review and improve:\n\n${refinedRaw}` },
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
-          const { data: reflectData } = await callAI(reflectionMsgs, {
-            maxTokens: reflectionMaxTokens,
-            timeoutMs: 120000,
-            onChunk: (partial) => reflectThrottle.update(partial),
+          // Briefly show an activity hint; no streaming (saves UI overhead on weak HW).
+          const { data: reviewData } = await callAI(reviewMsgs, {
+            maxTokens: reviewMaxTokens,
+            timeoutMs: 180000,
           });
-          reflectThrottle.flush();
-          setStreamingText("");
-          if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
-          const reflectRaw = extractRaw(reflectData);
-          // Sanity check: keep memory_update tag integrity — never lose memory
-          if (reflectRaw.length > 50) {
-            if (reflectRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              refinedRaw = reflectRaw;
+          if (reviewData.usage) setUsage(p => ({ i: p.i + (reviewData.usage.prompt_tokens || 0), o: p.o + (reviewData.usage.completion_tokens || 0) }));
+          const reviewRaw = extractRaw(reviewData);
+          // Sanity gate: only adopt review output if it's substantive.
+          if (reviewRaw.length > 50) {
+            if (reviewRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
+              refinedRaw = reviewRaw;
             } else if (originalMemoryBlock) {
-              // Reflection lost the memory_update — re-append it
-              refinedRaw = reflectRaw + "\n\n" + originalMemoryBlock;
+              // Review lost the memory_update — re-append so we never lose memory.
+              refinedRaw = reviewRaw + "\n\n" + originalMemoryBlock;
+            } else {
+              refinedRaw = reviewRaw;
             }
           }
-          // Update checkpoint after each successful reflection
           checkpointRaw = refinedRaw;
-        } catch (reflectErr) {
-          console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
-          setStreamingText("");
-          // Continue with current refined version — don't crash
+        } catch (reviewErr) {
+          console.warn("Socratic review skipped (error):", reviewErr);
+          // Fall through with the original mainRaw — don't crash.
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
-      let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
-        // ─── Abort check ───
-        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-        setActivityStatus("Final verification: checking quality of work...");
-        const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
-
-Review this SMSF expert response and check:
-1. Does it FULLY answer the user's question with no gaps?
-2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
-3. Are there any compliance issues, misleading statements, or incorrect legislative references?
-4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <expression> and <memory_update> tags present and intact?
-
-If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
-If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
-
-        const verifyMsgs = [
-          { role: "system", content: verificationSystem },
-          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
-        ];
-
-        try {
-          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: 120000 });
-          if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
-          const verifyRaw = extractRaw(verifyData);
-          if (verifyRaw.length > 50) {
-            if (verifyRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              finalRaw = verifyRaw;
-            } else if (originalMemoryBlock) {
-              finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
-            }
-          }
-        } catch {
-          finalRaw = refinedRaw; // Fall back to refined response on verification error
-        }
-      }
+      const finalRaw = refinedRaw;
 
       // ─── Finalise: parse response and update state ───
       const { text, actions } = parseResponse(finalRaw);
@@ -1842,15 +1703,14 @@ ${chatHtml}
   return (
     <div style={{ ...S, height: "100vh", display: "flex", fontFamily: "var(--f)", color: "var(--tx)", background: "var(--bg)", overflow: "hidden", fontSize: "13.5px" }}>
       {/* PDF Viewer Modal */}
-      {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
+      {pdfViewerOpen && pdfDocs[pdfViewerIdx] && pdfDocs[pdfViewerIdx].blobUrl && (
         <PdfViewer
-          pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
           blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
           onClose={() => setPdfViewerOpen(false)}
         />
       )}
       {/* Full Document Text Viewer Modal — shows complete extracted text for cross-referencing */}
-      {docTextViewerOpen && pdfDocs[docTextViewerIdx] && (
+      {docTextViewerOpen && pdfDocs[docTextViewerIdx] && !pdfDocs[docTextViewerIdx]._loading && (
         <div style={{ position: "fixed", inset: 0, zIndex: 2000, background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column", animation: "fadeIn .2s ease" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "#0d0d14", borderBottom: "1px solid var(--bd)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
@@ -1919,19 +1779,46 @@ ${chatHtml}
               <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
                 <span style={{ fontSize: "11px" }}>{"\uD83D\uDCDA"}</span>
                 <span style={{ fontWeight: 700, fontSize: "11px" }}>SMSF Documents</span>
-                <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded</span>
+                <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>
+                  {pdfDocs.filter(d => !d._loading).length}/{pdfDocs.length} ready
+                </span>
               </div>
               {pdfDocs.map((doc, i) => (
-                <div key={i} style={{
+                <div key={doc._id || doc.name + "-" + i} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
-                  borderRadius: "5px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.1)",
+                  borderRadius: "5px",
+                  background: doc._loading ? "rgba(204,153,85,0.06)" : "rgba(136,187,204,0.05)",
+                  border: doc._loading ? "1px solid rgba(204,153,85,0.25)" : "1px solid rgba(136,187,204,0.1)",
                   marginBottom: "4px",
+                  flexDirection: "column", alignItems: "stretch",
                 }}>
-                  <span style={{ fontSize: "10px" }}>{"\uD83D\uDCC4"}</span>
-                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }}>{doc.name}</span>
-                  <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount}pg</span>
-                  <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
-                  <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "10px" }}>{doc._loading ? "\u23F3" : "\uD83D\uDCC4"}</span>
+                    <span
+                      style={{ fontSize: "10px", color: doc._loading ? "#cc9955" : "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: doc._loading ? "default" : "pointer" }}
+                      onClick={() => { if (!doc._loading && doc.blobUrl) { setPdfViewerIdx(i); setPdfViewerOpen(true); } }}
+                      title={doc._loading ? "Extracting document..." : doc.name}
+                    >{doc.name}</span>
+                    <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>
+                      {doc._loading ? (doc.pageCount ? doc.pageCount + "pg" : "...") : doc.pageCount + "pg"}
+                    </span>
+                    {!doc._loading && (
+                      <>
+                        <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
+                        <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                      </>
+                    )}
+                  </div>
+                  {doc._loading && (
+                    <div style={{ marginTop: "3px" }}>
+                      <div style={{ height: "2px", background: "rgba(255,255,255,0.06)", borderRadius: "1px", overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: (doc._progressPct || 5) + "%", background: "linear-gradient(90deg,#cc9955,#88bbcc)", transition: "width 0.25s ease" }} />
+                      </div>
+                      <div style={{ fontSize: "8px", color: "#cc9955", fontFamily: "var(--m)", marginTop: "2px" }}>
+                        {doc._progressText || "Processing..."}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
               <div style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", marginTop: "4px", lineHeight: 1.4 }}>

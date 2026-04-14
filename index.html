@@ -14,7 +14,22 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
-    <script src="https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@latest/dist/web-llm.js"></script>
+    <!--
+      WebLLM is distributed as an ES module. Load it at page-load time and expose
+      it on window so the app never has to perform a runtime network import
+      (which would otherwise fire on first model load). Uses a pinned version
+      for reproducibility. No user data is transmitted by this request.
+    -->
+    <script type="module">
+      try {
+        const m = await import("https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.82/+esm");
+        window.webllm = m;
+        window.__webllmReady = true;
+      } catch (e) {
+        console.warn("WebLLM preload failed; will fall back to runtime import.", e);
+        window.__webllmReady = false;
+      }
+    </script>
     
     <script type="text/babel" data-presets="react" src="./meow.jsx"></script>
   </body>
