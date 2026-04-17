@@ -20,7 +20,7 @@ async function getWebLLM() {
 }
 
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
-function createStreamThrottle(setState, intervalMs = 120) {
+function createStreamThrottle(setState, intervalMs = 200) {
   let pending = null;
   let timer = null;
   return {
@@ -117,13 +117,13 @@ function getDocTokenBudget(modelId) {
   const totalCtx = modelDef ? modelDef.contextWindow : 32768;
   // For small models (Qwen 0.5B), use much tighter budget — iGPU can't handle full 32K KV cache
   const isSmallModel = totalCtx <= 32768;
-  // Reserve tokens: system prompt (~4K), chat history (~3K), generation (~3K), memory (~1K), safety margin (~2K)
-  const reserved = isSmallModel ? 16000 : 14000;
-  return Math.max(totalCtx - reserved, 6000);
+  // Reserve tokens: system prompt (~5K), chat history (~4K), generation (~3K), memory (~1K), safety (~2K), overhead (~5K)
+  const reserved = isSmallModel ? 20000 : 14000;
+  return Math.max(totalCtx - reserved, 4000);
 }
 
 // ─── Chunk document into page-groups for smart inclusion ───
-function chunkDocumentByPages(docText, pageCount, chunkPages = 20) {
+function chunkDocumentByPages(docText, pageCount, chunkPages = 15) {
   const chunks = [];
   for (let start = 1; start <= pageCount; start += chunkPages) {
     const end = Math.min(start + chunkPages - 1, pageCount);
@@ -255,7 +255,7 @@ async function saveChat(msgs) {
 }
 // ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
 // Optimised for 1000+ page documents: batched processing, lower scale, limited images
-const MAX_PAGE_IMAGES = 3; // Only render first 3 scanned pages as images to save memory
+const MAX_PAGE_IMAGES = 2; // Only render first 2 scanned pages as images to save memory on weak hardware
 
 async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
@@ -393,7 +393,7 @@ function buildDocIndex(docText, pageCount) {
   const toc = [];
   for (let i = 1; i < pages.length && i <= pageCount; i++) {
     const pageContent = (pages[i] || "").trim();
-    const preview = pageContent.slice(0, 150).replace(/\s+/g, " ").trim();
+    const preview = pageContent.slice(0, 80).replace(/\s+/g, " ").trim();
     if (preview) toc.push(`Page ${i}: ${preview}...`);
     else toc.push(`Page ${i}: (empty or scanned page)`);
   }
@@ -765,13 +765,13 @@ function Auto() {
     };
   }, []);
 
-  // Debounced scroll-into-view to prevent excessive smooth scrolling during streaming
+  // Debounced scroll-into-view — longer debounce to reduce jank on weak hardware
   const scrollTimerRef = useRef(null);
   useEffect(() => {
     if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
       scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, 150);
+    }, 350);
   }, [msgs, busy, streamingText]);
 
   // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
@@ -1138,10 +1138,16 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
           s += `\n<document name="${doc.name}" pages="${doc.pageCount}" included="full">\n${doc.text}\n</document>\n`;
         } else {
           // Large document — use smart chunked inclusion with relevance scoring
-          const toc = buildDocIndex(doc.text, doc.pageCount);
-          const tocTokens = estimateTokens(toc);
+          let toc = buildDocIndex(doc.text, doc.pageCount);
+          let tocTokens = estimateTokens(toc);
+          // Cap TOC to 30% of per-doc budget to leave room for actual page content
+          const maxTocTokens = Math.floor(perDocBudget * 0.3);
+          if (tocTokens > maxTocTokens) {
+            toc = toc.slice(0, Math.floor(maxTocTokens * 3.2)) + "\n[...TOC truncated — " + doc.pageCount + " pages total]";
+            tocTokens = maxTocTokens;
+          }
           // Reserve tokens for TOC, then fill remaining with most relevant page chunks
-          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 4000);
+          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 3000);
           const chunks = chunkDocumentByPages(doc.text, doc.pageCount, 15);
           const queryTerms = extractQueryTerms(lastUserQueryRef.current || "");
           // Add SMSF-specific terms that are always relevant for cross-referencing
@@ -1195,9 +1201,10 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
-    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
+    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const isSmallModelCap = modelDefCap && modelDefCap.contextWindow <= 32768;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * (isSmallModelCap ? 0.45 : 0.50)) : 12000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -1384,7 +1391,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   const send = useCallback(async () => {
     const txt = input.trim();
     if (!txt && attachments.length === 0) return;
-    if (busy || busyRef.current) return; // ref-based double-send guard
+    if (busyRef.current) return; // ref-only guard — avoids stale closure on busy state
     // Block sending if PDFs are still being extracted
     if (attachments.some(att => att._loading)) {
       setErr("Please wait — PDF extraction is still in progress.");
@@ -1407,7 +1414,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       userContent = (txt || "Here are my attached files:") + attachBlock;
     }
     const userMsg = { role: "user", content: userContent };
-    let currentMsgs = [...msgs, userMsg];
+    let currentMsgs = [...msgsRef.current, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
     // Save user message immediately so it persists even if the AI call fails or page closes
@@ -1437,9 +1444,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       abortRef.current = new AbortController();
       const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
+      // ─── STEP 1: Planning — DISABLED for privacy (no data sent to external servers) ───
+      // All AI processing runs 100% offline. Web research removed to ensure no SMSF document
+      // information, queries, or metadata is ever transmitted to DuckDuckGo or any other service.
+      const researchQuestions = [];
+      if (false) { // Web research disabled for data privacy — re-enable by changing to: if (!hasDocuments && !isSimpleQuery)
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -1515,7 +1524,8 @@ Rules:
       // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
       setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
 
-      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
+      // Trim chat history for the API call only — never modify currentMsgs (preserves full history in state)
+      const apiHistory = currentMsgs.length > MAX_MSGS ? currentMsgs.slice(-MAX_MSGS) : currentMsgs;
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
@@ -1530,20 +1540,21 @@ Rules:
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
-        ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+        ...apiHistory.map(m => ({ role: m.role, content: m.content })),
       ];
 
       // Stream the main response for real-time display
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      // Conservative max_tokens: prevent GPU OOM on iGPU (Acer Aspire 5 / Intel Iris Xe)
+      const mainMaxTokens = isSmallModel ? Math.min(1536, Math.floor(modelDef.contextWindow * 0.08)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.10), 6144) : 1536;
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware (200ms)
+      const streamThrottle = createStreamThrottle(setStreamingText, 200);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
-        timeoutMs: 300000,
+        timeoutMs: 180000,
         onChunk: (partial) => streamThrottle.update(partial),
       });
       streamThrottle.flush(); // Ensure final content is displayed
@@ -1570,8 +1581,8 @@ Rules:
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      // Reflection uses reduced maxTokens to prevent GPU OOM on weak hardware
+      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1024) : Math.min(mainMaxTokens, 3072);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1607,7 +1618,7 @@ Rules:
 
         try {
           // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          const reflectThrottle = createStreamThrottle(setStreamingText, 250);
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
             timeoutMs: 120000,
@@ -1681,18 +1692,24 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
 
       if (actions.expression) setExpression(actions.expression);
 
+      // Cap memory to prevent infinite growth bloating the system prompt
+      const MAX_MEMORY_CHARS = 4000;
+      const capMemory = (m) => m && m.length > MAX_MEMORY_CHARS ? m.slice(-MAX_MEMORY_CHARS) : m;
+
       if (actions.memoryUpdate) {
-        setMem(actions.memoryUpdate);
-        setMemDraft(actions.memoryUpdate);
-        saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
+        const cappedMem = capMemory(actions.memoryUpdate);
+        setMem(cappedMem);
+        setMemDraft(cappedMem);
+        saveVal(MEMORY_STORAGE_KEY, cappedMem);
         if (text) {
           currentMsgs = [...currentMsgs, { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*` }];
         }
       } else if (text) {
         currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
-        const autoMemory = mem.trim()
-          ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
-          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
+        let autoMemory = memRef.current.trim()
+          ? memRef.current + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 150)}". Auto responded about: ${text.slice(0, 150)}`
+          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 150)}". Auto responded about: ${text.slice(0, 150)}`;
+        autoMemory = capMemory(autoMemory);
         setMem(autoMemory);
         setMemDraft(autoMemory);
         saveVal(MEMORY_STORAGE_KEY, autoMemory);
@@ -1730,7 +1747,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
       setStreamingText("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
+  }, [input, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
 
   // ─── Expression image resolver — blink overrides all other states ───
   const getExprImg = useCallback((speakingOverride = false) => {
@@ -2111,6 +2128,7 @@ ${chatHtml}
                   : "No model loaded"}
             </span>
             <span style={{ fontSize: "9px", color: "#88bbcc", fontFamily: "var(--m)", opacity: 0.6 }}>SMSF</span>
+            <span style={{ fontSize: "8px", color: "#7a7", fontFamily: "var(--m)", opacity: 0.7, padding: "1px 4px", borderRadius: "3px", background: "rgba(124,224,138,0.06)", border: "1px solid rgba(124,224,138,0.1)" }} title="All AI processing runs locally. No document data is sent to any server.">🔒 PRIVATE</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", borderColor: localModelStatus === "ready" ? "rgba(124,224,138,0.2)" : "rgba(255,255,255,0.05)", display: "inline-block" }}
@@ -2139,6 +2157,29 @@ ${chatHtml}
         {/* CHAT AREA */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px" }}>
+            {/* Document banner — always visible when documents are loaded */}
+            {pdfDocs.length > 0 && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", marginBottom: "10px",
+                borderRadius: "8px", background: "rgba(136,187,204,0.06)", border: "1px solid rgba(136,187,204,0.15)",
+                fontSize: "11px", fontFamily: "var(--m)", color: "var(--ac2)", flexWrap: "wrap",
+              }}>
+                <span style={{ fontSize: "14px" }}>{"\uD83D\uDCDA"}</span>
+                <span style={{ fontWeight: 700 }}>{pdfDocs.length} document{pdfDocs.length > 1 ? "s" : ""} loaded:</span>
+                {pdfDocs.map((doc, i) => (
+                  <span key={i} style={{
+                    padding: "2px 6px", borderRadius: "4px",
+                    background: "rgba(136,187,204,0.1)", border: "1px solid rgba(136,187,204,0.2)",
+                    cursor: "pointer", fontSize: "10px",
+                  }} onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }}>
+                    {doc.name} ({doc.pageCount}pg)
+                  </span>
+                ))}
+                <span style={{ fontSize: "9px", color: "var(--dm)", marginLeft: "auto" }}>
+                  AI will cross-reference with page citations
+                </span>
+              </div>
+            )}
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
                 <img src="./Expressions/Happy.png" alt="Auto" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
@@ -2146,7 +2187,8 @@ ${chatHtml}
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "500px", lineHeight: 1.6 }}>
                   SMSF document analysis assistant — runs fully offline.<br/>
                   Upload PDF trust deeds, investment strategies, member statements, or any SMSF documents.<br/>
-                  Auto will cross-reference them with page-level citations.
+                  Auto will cross-reference them with page-level citations.<br/>
+                  <span style={{ color: "#7a7", fontSize: "11px" }}>🔒 100% private — no document data ever leaves your device.</span>
                 </div>
                 {localModelStatus !== "ready" && localModelStatus !== "downloading" && localModelStatus !== "loading" && (
                   <div style={{ marginTop: "8px", padding: "10px 16px", borderRadius: "8px", background: "rgba(204,153,85,0.08)", border: "1px solid rgba(204,153,85,0.2)", fontSize: "11px", color: "#cc9955", textAlign: "center", maxWidth: "420px", lineHeight: 1.6 }}>
@@ -2158,7 +2200,7 @@ ${chatHtml}
                 )}
               </div>
             )}
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", contain: "content" }}>
               {msgs.map((m, i) => {
                 return (
                   <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "layout style" }}>
@@ -2181,12 +2223,12 @@ ${chatHtml}
                   </div>
                 );
               })}
-              {/* Streaming response display — shows text as it generates */}
+              {/* Streaming response display — plain text for performance (markdown applied on completion) */}
               {streamingText && busy && (
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                    <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.7, fontSize: "13.5px", color: "var(--tx)" }}>{streamingText}</div>
                   </div>
                 </div>
               )}
