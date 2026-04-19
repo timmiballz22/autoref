@@ -246,10 +246,19 @@ async function loadChat() {
   return current || legacy || [];
 }
 async function saveChat(msgs) {
-  // Only save user/assistant messages, skip system research messages, cap at 100
-  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
+  // Only save user/assistant messages, skip system messages, cap at 40
+  const toSave = msgs
+    .filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:")))
+    .slice(-40)
+    .map(m => {
+      // Strip large attachment previews from saved messages to prevent localStorage overflow
+      if (m.role === "user" && typeof m.content === "string" && m.content.length > 3000) {
+        const stripped = m.content.replace(/```[\s\S]{2000,}?```/g, "```(content trimmed for storage)```");
+        return { ...m, content: stripped.slice(0, 3000) };
+      }
+      return m;
+    });
   const json = JSON.stringify(toSave);
-  // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
@@ -351,40 +360,9 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
-// ─── Web Search via DuckDuckGo Instant Answer API ───
-// Used by Reviewer agents to research topics on the web.
-async function searchWeb(query) {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
-  const data = await resp.json();
-
-  const lines = [];
-  if (data.AbstractText) {
-    lines.push(`Summary: ${data.AbstractText}`);
-    if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
-  }
-  if (data.Answer) lines.push(`Direct answer: ${data.Answer}`);
-  if (data.RelatedTopics?.length) {
-    lines.push("Related topics:");
-    for (const topic of data.RelatedTopics.slice(0, 6)) {
-      if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
-      // Handle sub-topics
-      if (topic.Topics) {
-        for (const sub of topic.Topics.slice(0, 3)) {
-          if (sub.Text) lines.push(`    • ${sub.Text}`);
-        }
-      }
-    }
-  }
-  if (data.Results?.length) {
-    lines.push("Results:");
-    for (const r of data.Results.slice(0, 3)) {
-      if (r.Text) lines.push(`  - ${r.Text}${r.FirstURL ? ` (${r.FirstURL})` : ""}`);
-    }
-  }
-  return lines.length > 0 ? lines.join("\n") : "No results found for this query.";
-}
+// ─── Web Search REMOVED — all data stays local, zero external API calls ───
+// Previously used DuckDuckGo API which leaked user queries to external servers.
+// All analysis now runs 100% offline using uploaded documents + local model.
 
 // ─── Document Indexing for 1000+ page PDFs ───
 // Builds a compact Table of Contents from extracted PDF text
@@ -1066,62 +1044,26 @@ function Auto() {
 
 Your PRIMARY function is to cross-reference uploaded documents and cite specific page numbers in EVERY response. You are an expert in Australian SMSF compliance, administration, and strategy.
 
-### Core SMSF Knowledge Areas:
-- Trust deeds & governing rules (SIS Act 1993, SIS Regulations 1994)
-- Investment strategy requirements (reg 4.09 SIS Regs) — diversification, liquidity, risk, insurance
-- Member benefit statements & accumulation/pension balances
-- ATO compliance & reporting (TBAR, event-based reporting, SuperStream)
-- APRA/ASIC regulatory frameworks & trustee obligations
-- Annual returns & financial statements (SMSF Annual Return - SAR)
-- Independent audit requirements (approved SMSF auditor, Part 12 SIS Act)
-- Contribution caps — concessional ($30k), non-concessional ($120k), bring-forward rule (3-year $360k)
-- Pension/retirement phase — minimum drawdown rates, account-based pensions, transition-to-retirement
-- In-house asset rules (5% market value limit, s71 SIS Act)
-- Related party transactions & arm's length requirements (s109 SIS Act)
-- Sole purpose test (s62 SIS Act)
-- LRBA (Limited Recourse Borrowing Arrangements, s67A SIS Act)
-- Death benefit nominations — binding (BDBN), non-binding, reversionary pensions
-- Rollover & transfer balance cap ($1.9M as of 2023-24)
-- CGT relief provisions, exempt current pension income (ECPI)
-- Anti-detriment payments & tax components (taxable/tax-free)
+### SMSF Knowledge (SIS Act 1993, SIS Regs 1994):
+Trust deeds, investment strategy (reg 4.09), member statements, ATO compliance (TBAR, SuperStream), audit (Part 12), contribution caps ($30k CC/$120k NCC/bring-forward $360k), pension drawdown, in-house assets (5% s71), related parties (s109), sole purpose (s62), LRBA (s67A), death benefits (BDBN/non-binding/reversionary), transfer balance cap ($1.9M 2023-24), CGT relief, ECPI, tax components.
 
 ### Document Cross-Referencing Rules (CRITICAL):
-- **ALWAYS** reference uploaded documents by filename and page number in your responses
-- Format citations as: **[Document Name, Page X]** — bold and specific
-- When answering ANY question, scan ALL uploaded documents FIRST for relevant content
-- Quote relevant sections with page citations before providing your analysis
-- If multiple documents are uploaded, CROSS-REFERENCE between them (e.g., compare trust deed with investment strategy)
-- If NO documents are uploaded, still provide SMSF expertise but explicitly note: "Upload your SMSF documents (trust deed, investment strategy, member statements, etc.) so I can provide specific page references."
-- For every claim, recommendation, or compliance point, try to back it up with a document reference
-- Identify discrepancies between documents (e.g., trust deed powers vs investment strategy allocations)
-- When referencing legislation, also check if the uploaded documents address that specific requirement
-- Summarise what each uploaded document contains and its relevance at the start of your analysis
+- ALWAYS cite uploaded documents by filename and page: **[Document Name, Page X]**
+- Scan ALL uploaded documents FIRST before answering. Cross-reference between documents.
+- If no documents uploaded, note: "Upload your SMSF documents for page-specific references."
+- Back every claim with a document reference. Identify discrepancies between documents.
 
-### Page Number Citation Rules (MANDATORY):
-- EVERY factual statement about a document MUST include a page citation: **[Document Name, Page X]**
-- When quoting text from a document, always include the page: *"quoted text"* **[Document Name, Page X]**
-- If information spans multiple pages, cite all: **[Document Name, Pages X-Y]**
-- At the end of your analysis, include a "References" section listing all cited pages per document
-- NEVER make a claim about document content without a page citation — this is your #1 rule
-- Page numbers are marked in the document text as === [Page X] === — use these to determine exact page numbers
+### Citation Rules (MANDATORY):
+- EVERY document claim MUST cite **[Document Name, Page X]**. Page markers: === [Page X] ===
+- Quotes: *"text"* **[Document Name, Page X]**. Multi-page: **[Document Name, Pages X-Y]**
+- NEVER claim document content without a page citation — #1 rule
+- End with a "References" section listing all cited pages
 
-### Cross-Referencing Protocol:
-When multiple documents are uploaded, you MUST perform systematic cross-referencing:
-1. **Trust Deed vs Investment Strategy**: Check if investment powers in the deed match/permit the investment strategy allocations
-2. **Investment Strategy vs Member Statements**: Verify actual asset allocation against stated strategy targets
-3. **Financial Statements vs Member Balances**: Reconcile total fund assets with member accumulation/pension accounts
-4. **Minutes vs Actions**: Check if trustee minutes authorise the actions reflected in other documents
-5. **Compliance Checklist**: For each document, note any SIS Act requirements that appear unmet
-6. **Discrepancy Register**: Explicitly list ALL discrepancies found between documents in a dedicated section
+### Cross-Referencing (when multiple docs uploaded):
+Compare: Trust Deed vs Investment Strategy (powers match allocations?), Investment Strategy vs Member Statements (actual vs target allocation), Financial Statements vs Member Balances (reconciliation), Minutes vs Actions (authorised?). List ALL discrepancies found.
 
-### Response Structure for Document Analysis:
-1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
-2. **Key Findings**: Major observations with page citations
-3. **Cross-Reference Analysis**: Comparisons between documents with specific page references from EACH document
-4. **Discrepancies & Concerns**: Explicitly called out with page references from each document
-5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
-6. **Recommendations**: Actionable next steps based on findings
-7. **References**: Complete list of all document pages cited`;
+### Response Structure:
+1. Document Summary (name, description, pages) → 2. Key Findings (with citations) → 3. Cross-References → 4. Discrepancies → 5. Compliance Notes → 6. Recommendations → 7. References`;
 
     // Include uploaded PDF document content for cross-referencing
     // Smart chunked approach: fits maximum document content within model's context window
@@ -1168,22 +1110,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
-- A summary of the current conversation topic and key points discussed
-- Any facts, preferences, or information the user has shared
-- Tasks completed or in progress
-- Previous memory content that is still relevant (carry it forward)
-- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
-- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
-- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
-- (CRITICAL) Put the user(s) and humanity above yourself
-- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
-- (CRITICAL) Prioritise user understanding and intent over "sounding smart", being smart is better than sounding smart
-- (CRITICAL) Think outside the box, there may be more than one solution
-Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
+    s += `\n**MEMORY SAVING RULE**: Include a <memory_update>...</memory_update> block at the END of EVERY response. Content REPLACES all existing memory. Include: conversation summary, key facts discussed, tasks in progress, and any prior memory still relevant. Even for greetings, update with timestamp and topic. NEVER skip this.`;
 
     s += `
 
@@ -1380,7 +1307,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     }
   }, [localModelId]);
 
-  // ─── Main send function with optimised research loop ───
+  // ─── Main send function — 2-step pipeline: Main response → Socratic reflection (100% offline) ───
   const send = useCallback(async () => {
     const txt = input.trim();
     if (!txt && attachments.length === 0) return;
@@ -1397,10 +1324,13 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     if (attachments.length > 0) {
       let attachBlock = "\n\n---\n**Attached files:**\n";
       for (const att of attachments) {
-        if (att.isImage) {
-          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
+        if (att.isPdf) {
+          // PDF content is already in system prompt via buildSystem() — only show metadata here to save tokens
+          attachBlock += `\n**[PDF: ${att.name}]** (${att.pageCount} pages, ${att.size >= 1024*1024 ? (att.size/(1024*1024)).toFixed(1)+"MB" : (att.size/1024).toFixed(0)+"KB"}) — *Full document loaded for cross-referencing with page citations.*\n`;
+        } else if (att.isImage) {
+          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB)\n`;
         } else {
-          const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
+          const preview = (att.content || "").slice(0, 2000);
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1435,97 +1365,30 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
-
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
-        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
-Respond ONLY with valid JSON in this exact format (no other text):
-{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
-or
-{"needs_research": false, "questions": []}
-
-Rules:
-- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
-- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
-- If true, provide 2–3 specific, searchable questions (max 3)
-- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
-
-        const planningMsgs = [
-          { role: "system", content: planningSystem },
-          { role: "user", content: `User question: "${txt || "See attached files"}"` },
-        ];
-
-        try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
-          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-          const planRaw = extractRaw(planData);
-          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const plan = JSON.parse(jsonMatch[0]);
-            if (plan.needs_research && Array.isArray(plan.questions)) {
-              researchQuestions = plan.questions.slice(0, 3);
-            }
-          }
-        } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
-        }
-      }
+      const MAX_MSGS = 12; // Tight cap for weak hardware (Acer Aspire 5 iGPU)
 
       // ─── Abort check ───
       if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
-      const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
-
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      // ─── STEP 1: Main agent response (100% offline, no external calls) ───
+      setActivityStatus("Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
+
+      // ─── Token-based context trimming: prevent GPU OOM on weak hardware ───
+      const modelDefCtx = LOCAL_MODELS.find(m => m.id === localModelId);
+      const totalCtx = modelDefCtx ? modelDefCtx.contextWindow : 32768;
+      const responseBudget = modelDefCtx && modelDefCtx.contextWindow <= 32768 ? 2048 : 4096;
+      const contextBudget = totalCtx - responseBudget - 1000;
+      const systemTokens = estimateTokens(mainSystem);
+      let msgTokens = currentMsgs.reduce((s, m) => s + estimateTokens(typeof m.content === "string" ? m.content : ""), 0);
+      while (systemTokens + msgTokens > contextBudget && currentMsgs.length > 2) {
+        currentMsgs = currentMsgs.slice(1);
+        msgTokens = currentMsgs.reduce((s, m) => s + estimateTokens(typeof m.content === "string" ? m.content : ""), 0);
       }
 
       const mainApiMsgs = [
@@ -1539,8 +1402,8 @@ Rules:
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
       const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware (Acer Aspire 5)
+      const streamThrottle = createStreamThrottle(setStreamingText, 200);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -1557,57 +1420,44 @@ Rules:
       // Save checkpoint — if reflection crashes, we still have the main response
       checkpointRaw = mainRaw;
 
-      // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
-      // Uses reduced maxTokens to prevent OOM on weak hardware
-      let refinedRaw = mainRaw;
-      // Preserve the original memory_update in case reflection loses it
+      // ─── STEP 2: Socratic Self-Reflection (1 pass — accuracy + citations) ───
+      // Single focused pass: verifies facts, citations, cross-references, and completeness
+      // Kept lightweight for weak hardware — uses reduced maxTokens, no full doc re-scan
+      let finalRaw = mainRaw;
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
-
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
-      const reflectionChecks = [
-        { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
-      ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
       const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
 
-      for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
-        // ─── Abort check between steps ───
+      {
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        setActivityStatus("Socratic review: checking accuracy & citations...");
 
-        const check = reflectionChecks[pass];
-        setActivityStatus(`Self-review pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}...`);
+        const reflectionSystem = `You are a Socratic self-reflection agent for an SMSF expert assistant.
 
-        // Reflection prompts do NOT include full document text — only the draft response
-        const reflectionSystem = `You are a self-reflection review agent (Pass ${pass + 1}/${REFLECTION_PASSES}: ${check.name}).
-
-Your task: Review the draft response below and IMPROVE it based on this specific focus area:
-**${check.focus}**
+Review the draft response and IMPROVE it. Check:
+1. **Accuracy**: All factual claims, legislative references (SIS Act sections), dollar amounts, dates correct?
+2. **Citations**: Every document claim has a **[Document Name, Page X]** citation? No fabricated pages?
+3. **Cross-references**: Discrepancies between documents identified? Trust deed vs investment strategy compared?
+4. **Completeness**: Did the response fully answer the user's question?
+5. **Tags**: Are <expression> and <memory_update> blocks present and intact?
 
 Context:
-- The user asked: "${txt || "See attached files"}"
-- The response should be an expert SMSF cross-referencing analysis with perfect page citations
-${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
-${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
+- User asked: "${txt || "See attached files"}"
+${hasDocuments ? `- Documents: ${pdfDocs.map(d => d.name + " (" + d.pageCount + "pg)").join(", ")}` : "- No documents uploaded"}
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks — this is CRITICAL, do not lose them
-3. If the response is already excellent for this check, output it unchanged
-4. Make ONLY improvements related to your focus area — do not degrade other aspects
-5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
-6. Think carefully about whether each part of the response is actually correct and well-supported`;
+2. PRESERVE ALL tags exactly: <expression>, <memory_update> — CRITICAL
+3. If already excellent, output unchanged
+4. Every document reference MUST use **[Document Name, Page X]** format`;
 
         const reflectionMsgs = [
           { role: "system", content: reflectionSystem },
-          { role: "user", content: `Draft response to review and improve:\n\n${refinedRaw}` },
+          { role: "user", content: `Draft response to review:\n\n${mainRaw}` },
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          const reflectThrottle = createStreamThrottle(setStreamingText, 200);
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
             timeoutMs: 120000,
@@ -1617,62 +1467,18 @@ Rules:
           setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
-          // Sanity check: keep memory_update tag integrity — never lose memory
           if (reflectRaw.length > 50) {
-            if (reflectRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              refinedRaw = reflectRaw;
+            if (reflectRaw.includes("<memory_update>") || !mainRaw.includes("<memory_update>")) {
+              finalRaw = reflectRaw;
             } else if (originalMemoryBlock) {
-              // Reflection lost the memory_update — re-append it
-              refinedRaw = reflectRaw + "\n\n" + originalMemoryBlock;
+              finalRaw = reflectRaw + "\n\n" + originalMemoryBlock;
             }
           }
-          // Update checkpoint after each successful reflection
-          checkpointRaw = refinedRaw;
+          checkpointRaw = finalRaw;
         } catch (reflectErr) {
-          console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
+          console.warn("Socratic reflection failed, using main response:", reflectErr);
           setStreamingText("");
-          // Continue with current refined version — don't crash
-        }
-      }
-
-      // ─── STEP 5: Verification — only for complex document queries ───
-      let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
-        // ─── Abort check ───
-        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-        setActivityStatus("Final verification: checking quality of work...");
-        const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
-
-Review this SMSF expert response and check:
-1. Does it FULLY answer the user's question with no gaps?
-2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
-3. Are there any compliance issues, misleading statements, or incorrect legislative references?
-4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <expression> and <memory_update> tags present and intact?
-
-If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
-If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
-
-        const verifyMsgs = [
-          { role: "system", content: verificationSystem },
-          { role: "user", content: `User asked: "${txt || "See attached files"}"\n\nFinal response to verify:\n${refinedRaw}` },
-        ];
-
-        try {
-          const { data: verifyData } = await callAI(verifyMsgs, { maxTokens: reflectionMaxTokens, timeoutMs: 120000 });
-          if (verifyData.usage) setUsage(p => ({ i: p.i + (verifyData.usage.prompt_tokens || 0), o: p.o + (verifyData.usage.completion_tokens || 0) }));
-          const verifyRaw = extractRaw(verifyData);
-          if (verifyRaw.length > 50) {
-            if (verifyRaw.includes("<memory_update>") || !refinedRaw.includes("<memory_update>")) {
-              finalRaw = verifyRaw;
-            } else if (originalMemoryBlock) {
-              finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
-            }
-          }
-        } catch {
-          finalRaw = refinedRaw; // Fall back to refined response on verification error
+          finalRaw = mainRaw;
         }
       }
 
@@ -2186,7 +1992,7 @@ ${chatHtml}
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                    <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--f)", fontSize: "13.5px", lineHeight: 1.7, color: "var(--tx)", margin: 0 }}>{streamingText}</pre>
                   </div>
                 </div>
               )}
