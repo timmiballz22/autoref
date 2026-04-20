@@ -188,6 +188,7 @@ const CHAT_STORAGE_KEY = "auto-chat";
 const LEGACY_CHAT_STORAGE_KEY = "meow-chat";
 const MEMORY_STORAGE_KEY = "auto-memory";
 const LEGACY_MEMORY_STORAGE_KEY = "meow-memory";
+const PDF_DOCS_STORAGE_KEY = "auto-pdf-docs";
 
 async function loadVal(key, legacyKey = null) {
   let value = "";
@@ -252,6 +253,50 @@ async function saveChat(msgs) {
   // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
+}
+
+// ─── PDF Document Persistence ───
+// Saves document metadata (name, text, pageCount) to localStorage so PDFs survive page refresh.
+// Binary data (blobUrl) is NOT persisted — only the extracted text matters for the AI.
+async function savePdfDocs(docs) {
+  if (!docs || docs.length === 0) {
+    try { window.localStorage.removeItem(PDF_DOCS_STORAGE_KEY); } catch {}
+    return;
+  }
+  try {
+    // Only persist essential fields — skip blobUrl and pageImages to save space
+    const toSave = docs.map(d => ({ name: d.name, text: d.text, pageCount: d.pageCount }));
+    const json = JSON.stringify(toSave);
+    // Guard: don't persist if total size would exceed 40MB (localStorage limit varies 5-10MB typically)
+    if (json.length > 40 * 1024 * 1024) {
+      console.warn("PDF docs too large to persist to localStorage (" + (json.length / 1024 / 1024).toFixed(1) + "MB). Saving metadata only.");
+      const metaOnly = docs.map(d => ({ name: d.name, text: d.text.slice(0, 200000), pageCount: d.pageCount, truncated: d.text.length > 200000 }));
+      const metaJson = JSON.stringify(metaOnly);
+      window.localStorage.setItem(PDF_DOCS_STORAGE_KEY, metaJson);
+      return;
+    }
+    window.localStorage.setItem(PDF_DOCS_STORAGE_KEY, json);
+  } catch (e) {
+    // localStorage quota exceeded — try saving truncated versions
+    console.warn("PDF docs storage failed, trying truncated save:", e);
+    try {
+      const truncated = docs.map(d => ({ name: d.name, text: d.text.slice(0, 100000), pageCount: d.pageCount, truncated: true }));
+      window.localStorage.setItem(PDF_DOCS_STORAGE_KEY, JSON.stringify(truncated));
+    } catch {}
+  }
+}
+
+async function loadPdfDocs() {
+  try {
+    const raw = window.localStorage.getItem(PDF_DOCS_STORAGE_KEY);
+    if (!raw) return [];
+    const docs = JSON.parse(raw);
+    if (!Array.isArray(docs)) return [];
+    // Restore docs with empty blobUrl/pageImages (binary data is not persisted)
+    return docs.map(d => ({ name: d.name, text: d.text || "", pageCount: d.pageCount || 0, pageImages: [], blobUrl: null, truncated: d.truncated || false }));
+  } catch {
+    return [];
+  }
 }
 // ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
 // Optimised for 1000+ page documents: batched processing, lower scale, limited images
@@ -674,10 +719,17 @@ function Auto() {
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
 
-  // Load on mount — auto-load previously cached model
+  // Load on mount — auto-load previously cached model + persisted PDFs
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
+    // Restore persisted PDF documents so they survive page refresh
+    loadPdfDocs().then(docs => {
+      if (docs?.length) {
+        setPdfDocs(docs);
+        setSidebarOpen(true);
+      }
+    });
     // Auto-load previously downloaded local model
     (async () => {
       const savedId = await loadVal(LOCAL_MODEL_KEY);
@@ -732,6 +784,14 @@ function Auto() {
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
   useEffect(() => { memRef.current = mem; }, [mem]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+
+  // Persist pdfDocs to localStorage whenever they change (so uploads survive refresh)
+  const pdfDocsInitRef = useRef(false);
+  useEffect(() => {
+    // Skip the first render (initial load) to avoid overwriting stored data with empty array
+    if (!pdfDocsInitRef.current) { pdfDocsInitRef.current = true; return; }
+    savePdfDocs(pdfDocs);
+  }, [pdfDocs]);
 
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
@@ -1060,11 +1120,18 @@ function Auto() {
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const modelDefPrompt = LOCAL_MODELS.find(m => m.id === localModelId);
+    const isLightModelPrompt = modelDefPrompt && modelDefPrompt.contextWindow <= 32768;
+
     let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.
 
 ## SMSF Document Expert
 
-Your PRIMARY function is to cross-reference uploaded documents and cite specific page numbers in EVERY response. You are an expert in Australian SMSF compliance, administration, and strategy.
+Your PRIMARY function is to cross-reference uploaded documents and cite specific page numbers in EVERY response. You are an expert in Australian SMSF compliance, administration, and strategy.`;
+
+    // Full knowledge section only for Medium/Heavy models — Light models need context space for documents
+    if (!isLightModelPrompt) {
+      s += `
 
 ### Core SMSF Knowledge Areas:
 - Trust deeds & governing rules (SIS Act 1993, SIS Regulations 1994)
@@ -1083,7 +1150,13 @@ Your PRIMARY function is to cross-reference uploaded documents and cite specific
 - Death benefit nominations — binding (BDBN), non-binding, reversionary pensions
 - Rollover & transfer balance cap ($1.9M as of 2023-24)
 - CGT relief provisions, exempt current pension income (ECPI)
-- Anti-detriment payments & tax components (taxable/tax-free)
+- Anti-detriment payments & tax components (taxable/tax-free)`;
+    } else {
+      s += `
+You know SIS Act 1993, SIS Regulations, ATO SMSF compliance, contribution caps ($30k concessional, $120k non-concessional), transfer balance cap ($1.9M), pension rules, in-house asset 5% rule, sole purpose test (s62), death benefit nominations, LRBA (s67A), and audit requirements.`;
+    }
+
+    s += `
 
 ### Document Cross-Referencing Rules (CRITICAL):
 - **ALWAYS** reference uploaded documents by filename and page number in your responses
@@ -1103,7 +1176,11 @@ Your PRIMARY function is to cross-reference uploaded documents and cite specific
 - If information spans multiple pages, cite all: **[Document Name, Pages X-Y]**
 - At the end of your analysis, include a "References" section listing all cited pages per document
 - NEVER make a claim about document content without a page citation — this is your #1 rule
-- Page numbers are marked in the document text as === [Page X] === — use these to determine exact page numbers
+- Page numbers are marked in the document text as === [Page X] === — use these to determine exact page numbers`;
+
+    // Cross-referencing protocol and response structure — omit for Light models to save context
+    if (!isLightModelPrompt) {
+      s += `
 
 ### Cross-Referencing Protocol:
 When multiple documents are uploaded, you MUST perform systematic cross-referencing:
@@ -1122,6 +1199,17 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
 6. **Recommendations**: Actionable next steps based on findings
 7. **References**: Complete list of all document pages cited`;
+    } else {
+      s += `
+
+### Response Structure:
+1. Document Summary (filename + page count)
+2. Key Findings with **[Document Name, Page X]** citations
+3. Cross-references between documents
+4. Discrepancies found
+5. Compliance notes
+6. References list`;
+    }
 
     // Include uploaded PDF document content for cross-referencing
     // Smart chunked approach: fits maximum document content within model's context window
@@ -1162,13 +1250,17 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
       s += `</documents>`;
     }
 
-    // Memory instructions
+    // Memory instructions — compact for Light models
     if (mem.trim()) {
-      s += `\n\n<memory>\nBelow is your persistent memory (saved to memory.txt and shown in chat). Reference it when relevant. If the user tells you to remember something, include a <memory_update> block at the END of your response with the COMPLETE updated memory content (not a diff).\n${mem}\n</memory>`;
-    } else {
-      s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
+      s += `\n\n<memory>\n${mem}\n</memory>`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
+    if (isLightModelPrompt) {
+      s += `\nInclude <memory_update>FULL updated memory</memory_update> at end of EVERY response. Include <expression>happy|serious|veryHappy</expression> at start.`;
+    } else {
+      if (!mem.trim()) {
+        s += `\n\nYou have a persistent memory system. If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
+      }
+      s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
 - A summary of the current conversation topic and key points discussed
 - Any facts, preferences, or information the user has shared
 - Tasks completed or in progress
@@ -1185,7 +1277,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 - (CRITICAL) Think outside the box, there may be more than one solution
 Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
 
-    s += `
+      s += `
 
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
@@ -1194,10 +1286,11 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 - <expression>veryHappy</expression> — use when celebrating, super excited, receiving amazing news, completing a big task successfully, or when the user achieves something great
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
+    }
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
-    const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    // Light models get tighter cap (45%) to leave room for response generation
+    const maxSystemTokens = modelDefPrompt ? Math.floor(modelDefPrompt.contextWindow * (isLightModelPrompt ? 0.45 : 0.55)) : 14000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -1274,15 +1367,24 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   // Options: { maxTokens, onChunk, timeoutMs }
   const callAI = useCallback(async (apiMsgs, opts = {}) => {
     const { maxTokens = 4096, onChunk = null, timeoutMs = 90000 } = opts;
-    // Validate engine is loaded
+    // Pre-flight check: validate engine exists and is usable
     if (!localEngineRef.current) {
       throw new Error("No model loaded. Please download and load a local model from the sidebar before sending messages.");
     }
 
-    // Timeout wrapper
+    // Pre-flight: estimate input tokens and warn if likely to OOM
+    const inputText = apiMsgs.map(m => typeof m.content === "string" ? m.content : "").join("");
+    const estimatedInputTokens = estimateTokens(inputText);
+    const modelDefCheck = LOCAL_MODELS.find(m => m.id === localModelId);
+    if (modelDefCheck && estimatedInputTokens > modelDefCheck.contextWindow * 0.85) {
+      throw new Error(`Input is too long (~${estimatedInputTokens.toLocaleString()} tokens) for ${modelDefCheck.name} (${modelDefCheck.contextWindow.toLocaleString()} context). Remove some documents or use a larger model.`);
+    }
+
+    // Timeout wrapper — with longer timeout for large document queries
+    const effectiveTimeout = estimatedInputTokens > 10000 ? Math.max(timeoutMs, 180000) : timeoutMs;
     const withTimeout = (promise) => {
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("LLM call timed out — try a shorter query or simpler model")), timeoutMs);
+        const timer = setTimeout(() => reject(new Error("LLM call timed out — try a shorter query or simpler model")), effectiveTimeout);
         promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
       });
     };
@@ -1431,16 +1533,40 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     try {
       // Offline-only: require a loaded local model
       if (!localEngineRef.current) {
-        throw new Error("No AI model loaded yet. Click the 🧠 Workspace button (top right), then Download the Qwen 2.5 0.5B model (recommended for your hardware). Once it says READY, you can chat.");
+        throw new Error("No AI model loaded yet. Click the \uD83E\uDDE0 Workspace button (top right), then Download the Qwen 2.5 0.5B model (recommended for your hardware). Once it says READY, you can chat.");
+      }
+      // Pre-flight: verify engine is still responding (catches stale/crashed engine)
+      try {
+        if (localEngineRef.current.chat && typeof localEngineRef.current.chat.completions?.create !== "function") {
+          throw new Error("stale");
+        }
+      } catch (preflight) {
+        throw new Error("AI model engine has crashed or been unloaded. Please reload the model from the Workspace panel.");
       }
 
       abortRef.current = new AbortController();
       const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
+      // ─── HARDWARE-AWARE PIPELINE CONFIGURATION ───
+      // Adapts pipeline complexity to model tier to prevent lag/crashes on weak hardware (Acer Aspire 5)
+      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
+      const isLightModel = modelDef && modelDef.contextWindow <= 32768; // Qwen 0.5B
+      const isMediumModel = modelDef && modelDef.tier === "Medium";    // Llama 3.2 3B
+      const isHeavyModel = modelDef && modelDef.tier === "Heavy";      // Phi 3.5 Mini
+
+      // Pipeline stages enabled per tier:
+      // Light:  Main only (1 LLM call) — fastest, prevents OOM/lag
+      // Medium: Main + 1 reflection (2 LLM calls) — balanced
+      // Heavy:  Main + 2 reflections + verification (4 LLM calls) — full Socratic review
+      const ENABLE_PLANNING = isHeavyModel && !hasDocuments && !isSimpleQuery;
+      const ENABLE_WEB_RESEARCH = false; // DISABLED: prevents data leakage to DuckDuckGo servers
+      const REFLECTION_COUNT = isLightModel ? 0 : isMediumModel ? 1 : 2;
+      const ENABLE_VERIFICATION = isHeavyModel && hasDocuments && !isSimpleQuery;
+
+      // ─── STEP 1: Planning — only on Heavy model, non-document queries ───
       let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
+      if (ENABLE_PLANNING) {
+        setActivityStatus("Planning...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
 {"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
@@ -1470,74 +1596,34 @@ Rules:
             }
           }
         } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
+          console.warn("Planning step failed, skipping:", planErr);
         }
       }
 
       // ─── Abort check ───
       if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
+      // ─── STEP 2: Web Research — DISABLED to prevent data leakage ───
+      // ALL document content stays local. No queries are sent to external servers.
+      // This ensures SMSF financial data, member names, fund details are NEVER leaked.
       const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
 
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      // ─── STEP 3: Main agent response (with STREAMING) ───
+      setActivityStatus(isLightModel ? "Generating response..." : "Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
-      }
 
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
         ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
       ];
 
-      // Stream the main response for real-time display
-      // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      // Conservative max_tokens per tier to prevent GPU OOM on weak hardware
+      const mainMaxTokens = isLightModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware
       const streamThrottle = createStreamThrottle(setStreamingText, 120);
@@ -1558,20 +1644,22 @@ Rules:
       checkpointRaw = mainRaw;
 
       // ─── STEP 4: Adaptive Self-Reflection Loop (Socratic review — PRESERVED) ───
-      // Adaptive: 2 passes for document queries (accuracy matters), 1 pass for simple queries
-      // Uses reduced maxTokens to prevent OOM on weak hardware
+      // Pipeline adapts to hardware:
+      //   Light (Qwen 0.5B): 0 passes — single response only (prevents lag/crashes)
+      //   Medium (Llama 3B):  1 pass  — accuracy check only
+      //   Heavy (Phi 3.5):    2 passes — full Socratic review (accuracy + completeness)
       let refinedRaw = mainRaw;
       // Preserve the original memory_update in case reflection loses it
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
+      const REFLECTION_PASSES = REFLECTION_COUNT;
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
       // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      const reflectionMaxTokens = isLightModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1635,9 +1723,9 @@ Rules:
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 5: Verification — only for Heavy model with complex document queries ───
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (ENABLE_VERIFICATION) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -1932,8 +2020,13 @@ ${chatHtml}
                   <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount}pg</span>
                   <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
                   <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                  <button onClick={() => { setPdfDocs(prev => prev.filter((_, j) => j !== i)); }} style={{ background: "none", border: "1px solid rgba(204,119,119,0.2)", color: "var(--dg)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="Remove document">×</button>
                 </div>
               ))}
+              <div style={{ display: "flex", gap: "4px", marginTop: "4px", alignItems: "center" }}>
+                <button onClick={() => { if (window.confirm("Remove all uploaded documents?")) setPdfDocs([]); }} style={{ ...btn("#cc7777"), fontSize: "8px", padding: "2px 6px" }}>Clear All Docs</button>
+                <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>Saved locally between sessions</span>
+              </div>
               <div style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", marginTop: "4px", lineHeight: 1.4 }}>
                 Click name/PDF to view pages. Text to see full extracted content.<br/>
                 AI cross-references with page citations using expanded {(LOCAL_MODELS.find(m => m.id === localModelId)?.contextWindow || 32768).toLocaleString()} token context.
@@ -2111,6 +2204,13 @@ ${chatHtml}
                   : "No model loaded"}
             </span>
             <span style={{ fontSize: "9px", color: "#88bbcc", fontFamily: "var(--m)", opacity: 0.6 }}>SMSF</span>
+            {localModelStatus === "ready" && (() => {
+              const md = LOCAL_MODELS.find(m => m.id === localModelId);
+              const tier = md?.tier || "Light";
+              const pipelineLabel = tier === "Light" ? "Fast (1-pass)" : tier === "Medium" ? "Balanced (2-pass)" : "Full Socratic (4-pass)";
+              const pipelineColor = tier === "Light" ? "#7ce08a" : tier === "Medium" ? "#88bbcc" : "#cc9955";
+              return <span style={{ fontSize: "8px", color: pipelineColor, fontFamily: "var(--m)", opacity: 0.7 }} title={`Pipeline: ${pipelineLabel}. Light=fastest, Heavy=most thorough.`}>{pipelineLabel}</span>;
+            })()}
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", borderColor: localModelStatus === "ready" ? "rgba(124,224,138,0.2)" : "rgba(255,255,255,0.05)", display: "inline-block" }}
@@ -2153,7 +2253,14 @@ ${chatHtml}
                     <strong>Step 1:</strong> Open the <strong>Workspace</strong> panel (top right) and download a local AI model.<br/>
                     <strong>Recommended for your hardware:</strong> Qwen 2.5 0.5B (Light) — fastest, works on low-end hardware.<br/>
                     <strong>Step 2:</strong> Upload your SMSF documents using the <strong>+</strong> button below.<br/>
-                    <strong>Step 3:</strong> Ask questions — Auto will cross-reference with page citations.
+                    <strong>Step 3:</strong> Ask questions — Auto will cross-reference with page citations.<br/>
+                    <span style={{ fontSize: "9px", opacity: 0.8 }}>Documents are saved locally and persist across sessions. No data is sent to external servers.</span>
+                  </div>
+                )}
+                {pdfDocs.length > 0 && (
+                  <div style={{ marginTop: "8px", padding: "8px 14px", borderRadius: "8px", background: "rgba(136,187,204,0.06)", border: "1px solid rgba(136,187,204,0.15)", fontSize: "11px", color: "#88bbcc", textAlign: "center", maxWidth: "420px" }}>
+                    {pdfDocs.length} document{pdfDocs.length > 1 ? "s" : ""} loaded: {pdfDocs.map(d => d.name).join(", ")}
+                    {pdfDocs.some(d => d.truncated) && <span style={{ color: "#cc9955", display: "block", fontSize: "9px", marginTop: "2px" }}>Some documents were truncated to fit storage. Re-upload for full content.</span>}
                   </div>
                 )}
               </div>
