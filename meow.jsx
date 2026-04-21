@@ -54,9 +54,9 @@ const LOCAL_MODELS = [
     ram: "2GB RAM",
     cpu: "Any CPU",
     desc: "Fastest. Basic quality. Works on low-end hardware.",
-    contextWindow: 32768,
-    slidingWindow: 32768,
-    prefillChunk: 2048,
+    contextWindow: 16384,
+    slidingWindow: 16384,
+    prefillChunk: 1024,
   },
   {
     id: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
@@ -114,12 +114,11 @@ function estimateTokens(text) {
 // Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU)
 function getDocTokenBudget(modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
-  const totalCtx = modelDef ? modelDef.contextWindow : 32768;
-  // For small models (Qwen 0.5B), use much tighter budget — iGPU can't handle full 32K KV cache
+  const totalCtx = modelDef ? modelDef.contextWindow : 16384;
   const isSmallModel = totalCtx <= 32768;
-  // Reserve tokens: system prompt (~4K), chat history (~3K), generation (~3K), memory (~1K), safety margin (~2K)
-  const reserved = isSmallModel ? 16000 : 14000;
-  return Math.max(totalCtx - reserved, 6000);
+  // Reserve: base system prompt (~3K), memory (~1K), chat history (~2K), generation (~2K), safety (~1K)
+  const reserved = isSmallModel ? 9000 : 14000;
+  return Math.max(totalCtx - reserved, 3000);
 }
 
 // ─── Chunk document into page-groups for smart inclusion ───
@@ -263,7 +262,7 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   const pageCount = pdf.numPages;
   let fullText = "";
   const pageImages = [];
-  const BATCH_SIZE = 10; // Yield to UI every 10 pages
+  const BATCH_SIZE = 5; // Yield to UI every 5 pages (more responsive on weak hardware)
   const skipImages = pageCount > 200; // Don't render images for very large docs
 
   for (let i = 1; i <= pageCount; i++) {
@@ -391,11 +390,13 @@ async function searchWeb(query) {
 function buildDocIndex(docText, pageCount) {
   const pages = docText.split(/=== \[Page \d+\] ===/);
   const toc = [];
+  // Sparse TOC for massive documents to fit within token budget
+  const step = pageCount > 500 ? 10 : pageCount > 100 ? 5 : 1;
   for (let i = 1; i < pages.length && i <= pageCount; i++) {
+    if (step > 1 && i > 1 && i < pageCount && i % step !== 0) continue;
     const pageContent = (pages[i] || "").trim();
-    const preview = pageContent.slice(0, 150).replace(/\s+/g, " ").trim();
-    if (preview) toc.push(`Page ${i}: ${preview}...`);
-    else toc.push(`Page ${i}: (empty or scanned page)`);
+    const preview = pageContent.slice(0, 120).replace(/\s+/g, " ").trim();
+    if (preview) toc.push(`P${i}: ${preview}...`);
   }
   return toc.join("\n");
 }
@@ -1124,10 +1125,13 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 7. **References**: Complete list of all document pages cited`;
 
     // Include uploaded PDF document content for cross-referencing
-    // Smart chunked approach: fits maximum document content within model's context window
-    // Uses query-relevant chunk selection for 1000+ page documents
+    // Budget is calculated from REMAINING space after base prompt, not a fixed number
     if (pdfDocs.length > 0) {
-      const tokenBudget = getDocTokenBudget(localModelId);
+      const modelDefBudget = LOCAL_MODELS.find(m => m.id === localModelId);
+      const maxSystemForDocs = modelDefBudget ? Math.floor(modelDefBudget.contextWindow * 0.5) : 8000;
+      const basePromptTokens = estimateTokens(s);
+      const memAndExprReserve = 2000;
+      const tokenBudget = Math.max(maxSystemForDocs - basePromptTokens - memAndExprReserve, 2000);
       const perDocBudget = Math.floor(tokenBudget / pdfDocs.length);
 
       s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number.\n`;
@@ -1141,8 +1145,8 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
           const toc = buildDocIndex(doc.text, doc.pageCount);
           const tocTokens = estimateTokens(toc);
           // Reserve tokens for TOC, then fill remaining with most relevant page chunks
-          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 4000);
-          const chunks = chunkDocumentByPages(doc.text, doc.pageCount, 15);
+          const chunkBudget = Math.max(perDocBudget - tocTokens - 500, 2000);
+          const chunks = chunkDocumentByPages(doc.text, doc.pageCount, 10);
           const queryTerms = extractQueryTerms(lastUserQueryRef.current || "");
           // Add SMSF-specific terms that are always relevant for cross-referencing
           const smsfTerms = ["trust", "deed", "investment", "strategy", "member", "balance", "compliance", "contribution", "pension", "benefit", "audit", "financial", "statement", "minutes", "rollover", "insurance", "asset", "allocation"];
@@ -1197,11 +1201,26 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.5) : 8000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
-      const charLimit = Math.floor(maxSystemTokens * 3.2);
-      s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
+      // Smart truncation: try to preserve base prompt + memory, trim document content first
+      const docStart = s.indexOf("<documents>");
+      const docEnd = s.indexOf("</documents>");
+      if (docStart > 0 && docEnd > docStart) {
+        const beforeDocs = s.slice(0, docStart);
+        const afterDocs = s.slice(docEnd + "</documents>".length);
+        const charBudgetForDocs = Math.floor(maxSystemTokens * 3.2) - beforeDocs.length - afterDocs.length;
+        if (charBudgetForDocs > 800) {
+          const docsContent = s.slice(docStart, docEnd + "</documents>".length);
+          s = beforeDocs + docsContent.slice(0, charBudgetForDocs) + "\n[Truncated to fit context]\n</documents>" + afterDocs;
+        } else {
+          s = beforeDocs + "<documents>[Documents too large for model. Use a larger model or fewer documents.]</documents>" + afterDocs;
+        }
+      } else {
+        const charLimit = Math.floor(maxSystemTokens * 3.2);
+        s = s.slice(0, charLimit) + "\n\n[NOTE: Content truncated to fit model context window.]";
+      }
     }
 
     return s;
@@ -1435,97 +1454,29 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
-      let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
-        setActivityStatus("Planning: checking if web research is needed...");
-        const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
-Respond ONLY with valid JSON in this exact format (no other text):
-{"needs_research": true, "questions": ["specific search query 1", "specific search query 2"]}
-or
-{"needs_research": false, "questions": []}
+      // ─── Model-aware settings for adaptive pipeline ───
+      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
+      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
+      const MAX_MSGS = isSmallModel ? 8 : 16;
 
-Rules:
-- needs_research should be true if the question requires current regulations, recent news, external facts, or information not contained in uploaded documents
-- needs_research should be false for general SMSF knowledge, document analysis, or simple calculations
-- If true, provide 2–3 specific, searchable questions (max 3)
-- Each question should be a complete search query (e.g. "SMSF contribution caps 2024 Australia ATO")`;
-
-        const planningMsgs = [
-          { role: "system", content: planningSystem },
-          { role: "user", content: `User question: "${txt || "See attached files"}"` },
-        ];
-
-        try {
-          const { data: planData } = await callAI(planningMsgs, { maxTokens: 256, timeoutMs: 20000 });
-          if (planData.usage) setUsage(p => ({ i: p.i + (planData.usage.prompt_tokens || 0), o: p.o + (planData.usage.completion_tokens || 0) }));
-          const planRaw = extractRaw(planData);
-          const jsonMatch = planRaw.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const plan = JSON.parse(jsonMatch[0]);
-            if (plan.needs_research && Array.isArray(plan.questions)) {
-              researchQuestions = plan.questions.slice(0, 3);
-            }
-          }
-        } catch (planErr) {
-          console.warn("Planning step failed, skipping web research:", planErr);
-        }
-      }
-
-      // ─── Abort check ───
-      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-      // ─── STEP 2: Reviewer agents — run in PARALLEL ───
-      const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
-
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
-
-          const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
-          const reviewerMsgs = [
-            { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
-          ];
-
-          try {
-            const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
-            if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
-          } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
-          }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
-        }
-      }
-
-      // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      // ─── STEP 1: Main agent — direct response (no web search for privacy) ───
+      setActivityStatus("Thinking...");
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
-      if (reviewerFindings.length > 0) {
-        mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
-        for (const { question, findings } of reviewerFindings) {
-          mainSystem += `\n**Researched:** ${question}\n**Findings:** ${findings}\n`;
-        }
-        mainSystem += `</web_research>`;
+
+      // ─── Context overflow guard: trim chat history to fit within model context ───
+      const systemTokens = estimateTokens(mainSystem);
+      const maxCtx = modelDef ? modelDef.contextWindow : 16384;
+      const maxHistoryTokens = Math.floor(maxCtx * 0.25);
+      let historyTokens = currentMsgs.reduce((s, m) => s + estimateTokens(typeof m.content === "string" ? m.content : ""), 0);
+      while (currentMsgs.length > 2 && historyTokens > maxHistoryTokens) {
+        const removed = currentMsgs.shift();
+        historyTokens -= estimateTokens(typeof removed.content === "string" ? removed.content : "");
       }
 
       const mainApiMsgs = [
@@ -1533,11 +1484,8 @@ Rules:
         ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
       ];
 
-      // Stream the main response for real-time display
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      const mainMaxTokens = isSmallModel ? 1536 : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.06), 4096) : 1536;
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware
       const streamThrottle = createStreamThrottle(setStreamingText, 120);
@@ -1565,13 +1513,15 @@ Rules:
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
-      const reflectionChecks = [
+      // Socratic review: 1 combined pass for small models, 2 passes for large models with docs
+      const REFLECTION_PASSES = (hasDocuments && !isSmallModel) ? 2 : 1;
+      const reflectionChecks = REFLECTION_PASSES === 2 ? [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
+      ] : [
+        { name: "Accuracy, Citations & Completeness", focus: "Verify ALL factual claims, legislative references (SIS Act sections), dollar amounts, and dates. Check EVERY document reference uses **[Document Name, Page X]** format — add missing citations, flag fabricated ones. Also check cross-references between documents, ensure no aspect of the user's question was missed, and verify <expression> and <memory_update> tags are present and intact." },
       ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1280) : Math.min(mainMaxTokens, 4096);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1589,8 +1539,8 @@ Your task: Review the draft response below and IMPROVE it based on this specific
 Context:
 - The user asked: "${txt || "See attached files"}"
 - The response should be an expert SMSF cross-referencing analysis with perfect page citations
-${reviewerFindings.length > 0 ? `- Web research was conducted: ${reviewerFindings.map(r => r.question).join("; ")}` : "- No web research was conducted"}
 ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pageCount + " pages)").join(", ")}` : "- No documents uploaded"}
+- All processing is offline — no web research was used
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
@@ -1635,9 +1585,9 @@ Rules:
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 3: Verification — only for large models with complex document queries ───
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModel) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -1818,7 +1768,7 @@ ${chatHtml}
     const printWin = window.open(url, "_blank");
     if (printWin) {
       printWin.onload = () => {
-        setTimeout(() => { printWin.print(); }, 500);
+        setTimeout(() => { printWin.print(); URL.revokeObjectURL(url); }, 600);
       };
     } else {
       // Fallback: download as HTML
@@ -1826,8 +1776,8 @@ ${chatHtml}
       a.href = url;
       a.download = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
       a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
     }
-    URL.revokeObjectURL(url);
   }, [msgs, pdfDocs, localModelId]);
 
   // ═══ RENDER ═══
