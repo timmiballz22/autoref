@@ -11,16 +11,21 @@ window.addEventListener("error", (event) => {
   // Don't prevent default here — let the ErrorBoundary handle React errors
 });
 
-// ─── WebLLM module cache (imported once, reused) ───
+// ─── WebLLM module — loaded once via ESM import, cached for reuse ───
 let _webllmModule = null;
 async function getWebLLM() {
   if (_webllmModule) return _webllmModule;
-  _webllmModule = await import("https://esm.run/@mlc-ai/web-llm");
+  try {
+    _webllmModule = await import("https://esm.run/@mlc-ai/web-llm");
+  } catch (e) {
+    throw new Error("Failed to load WebLLM library. Check your internet connection and try again. " + e.message);
+  }
   return _webllmModule;
 }
 
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
-function createStreamThrottle(setState, intervalMs = 120) {
+// Increased interval for Aspire 5 class hardware — markdown re-render is expensive
+function createStreamThrottle(setState, intervalMs = 250) {
   let pending = null;
   let timer = null;
   return {
@@ -245,26 +250,47 @@ async function loadChat() {
 
   return current || legacy || [];
 }
+// Debounced chat save — prevents main thread blocking from repeated JSON.stringify on large histories
+let _saveChatTimer = null;
+let _saveChatPending = null;
 async function saveChat(msgs) {
-  // Only save user/assistant messages, skip system research messages, cap at 100
+  _saveChatPending = msgs;
+  if (_saveChatTimer) return; // already scheduled
+  _saveChatTimer = setTimeout(async () => {
+    _saveChatTimer = null;
+    const toSave = (_saveChatPending || []).filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
+    _saveChatPending = null;
+    const json = JSON.stringify(toSave);
+    try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
+    try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
+  }, 300);
+}
+// Force-flush for critical moments (beforeunload)
+async function saveChatNow(msgs) {
+  if (_saveChatTimer) { clearTimeout(_saveChatTimer); _saveChatTimer = null; }
   const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
   const json = JSON.stringify(toSave);
-  // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
   try { window.localStorage.setItem(CHAT_STORAGE_KEY, json); } catch {}
 }
 // ─── PDF Text Extraction (uses pdf.js loaded from CDN) ───
 // Optimised for 1000+ page documents: batched processing, lower scale, limited images
-const MAX_PAGE_IMAGES = 3; // Only render first 3 scanned pages as images to save memory
+// Reduced from 3 to 1 for Aspire 5 class hardware — canvas rendering is extremely expensive
+const MAX_PAGE_IMAGES = 1;
 
 async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let pdf;
+  try {
+    pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  } catch (loadErr) {
+    throw new Error(`Could not open PDF "${fileName}": ${loadErr.message}. The file may be corrupted, password-protected, or not a valid PDF.`);
+  }
   const pageCount = pdf.numPages;
   let fullText = "";
   const pageImages = [];
   const BATCH_SIZE = 10; // Yield to UI every 10 pages
-  const skipImages = pageCount > 200; // Don't render images for very large docs
+  const skipImages = pageCount > 50; // Skip image rendering earlier for weak hardware
 
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdf.getPage(i);
@@ -319,14 +345,14 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
       // Scanned/handwritten page — render to image (limited to first MAX_PAGE_IMAGES)
       fullText += "(Scanned/handwritten page — see attached page image)";
       try {
-        const scale = 1.5; // ~150 DPI — 75% less memory than 3.0 scale
+        const scale = 1.0; // ~100 DPI — minimise memory for weak hardware
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
+        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.6) });
         // Release canvas memory immediately
         canvas.width = 0;
         canvas.height = 0;
@@ -352,8 +378,18 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
 }
 
 // ─── Web Search via DuckDuckGo Instant Answer API ───
-// Used by Reviewer agents to research topics on the web.
+// PRIVACY: This sends a search query to DuckDuckGo's servers.
+// Only used when webSearchEnabled is true AND the planning agent decides research is needed.
+// No document content, memory, or chat history is ever sent — only the search query string.
+let _webSearchEnabled = false;
+function setWebSearchEnabled(enabled) { _webSearchEnabled = enabled; }
+function isWebSearchEnabled() { return _webSearchEnabled; }
+
 async function searchWeb(query) {
+  if (!_webSearchEnabled) {
+    return "Web search is disabled (offline-only mode). Enable it in the sidebar to allow research queries.";
+  }
+  // Only the search query string is sent — never document content or user data
   const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&kl=wt-wt`;
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Search failed: HTTP ${resp.status}`);
@@ -369,7 +405,6 @@ async function searchWeb(query) {
     lines.push("Related topics:");
     for (const topic of data.RelatedTopics.slice(0, 6)) {
       if (topic.Text) lines.push(`  - ${topic.Text}${topic.FirstURL ? ` (${topic.FirstURL})` : ""}`);
-      // Handle sub-topics
       if (topic.Topics) {
         for (const sub of topic.Topics.slice(0, 3)) {
           if (sub.Text) lines.push(`    • ${sub.Text}`);
@@ -673,6 +708,7 @@ function Auto() {
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
+  const [webSearchOn, setWebSearchOn] = useState(false); // opt-in web search — off by default for privacy
 
   // Load on mount — auto-load previously cached model
   useEffect(() => {
@@ -737,7 +773,7 @@ function Auto() {
   useEffect(() => {
     // Save state to storage (called on interval, visibility change, beforeunload)
     const persistState = () => {
-      try { if (msgsRef.current.length > 0) saveChat(msgsRef.current); } catch {}
+      try { if (msgsRef.current.length > 0) saveChatNow(msgsRef.current); } catch {}
       try { if (memRef.current) saveVal(MEMORY_STORAGE_KEY, memRef.current); } catch {}
     };
 
@@ -765,14 +801,14 @@ function Auto() {
     };
   }, []);
 
-  // Debounced scroll-into-view to prevent excessive smooth scrolling during streaming
+  // Debounced scroll-into-view — only on new messages and busy changes, NOT on every streaming chunk
   const scrollTimerRef = useRef(null);
   useEffect(() => {
     if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
       scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, 150);
-  }, [msgs, busy, streamingText]);
+    }, 200);
+  }, [msgs, busy]);
 
   // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
   useEffect(() => {
@@ -1018,8 +1054,19 @@ function Auto() {
                 : att
             ));
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
+            // Prevent duplicates: replace existing doc with same name
             const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
-            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            setPdfDocs(prev => {
+              const existing = prev.findIndex(d => d.name === file.name);
+              if (existing >= 0) {
+                // Revoke old blob URL to free memory
+                if (prev[existing].blobUrl) try { URL.revokeObjectURL(prev[existing].blobUrl); } catch {}
+                const updated = [...prev];
+                updated[existing] = { name: file.name, text, pageCount, pageImages, blobUrl };
+                return updated;
+              }
+              return [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }];
+            });
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
@@ -1054,7 +1101,22 @@ function Auto() {
   }, []); // No stale dependency on attachments — all checks use functional updates
 
   const removeAttachment = useCallback((index) => {
-    setAttachments(prev => prev.filter((_, i) => i !== index));
+    setAttachments(prev => {
+      const removed = prev[index];
+      // Also remove from pdfDocs if it's a PDF — prevents phantom documents being sent to AI
+      if (removed && removed.isPdf) {
+        setPdfDocs(prevDocs => {
+          const updated = prevDocs.filter(d => d.name !== removed.name);
+          // Revoke blob URL to free memory
+          const removedDoc = prevDocs.find(d => d.name === removed.name);
+          if (removedDoc?.blobUrl) {
+            try { URL.revokeObjectURL(removedDoc.blobUrl); } catch {}
+          }
+          return updated;
+        });
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   // ─── System prompt builder ───
@@ -1393,14 +1455,19 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
     // Build user message content with attachments
+    // PDFs are already in the system prompt via pdfDocs — only list names here to save context tokens
     let userContent = txt;
     if (attachments.length > 0) {
       let attachBlock = "\n\n---\n**Attached files:**\n";
       for (const att of attachments) {
-        if (att.isImage) {
-          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
+        if (att.isPdf) {
+          // PDF content is already injected into the system prompt — just reference by name
+          attachBlock += `\n**[SMSF Document: ${att.name}]** (${att.pageCount} pages, ${(att.size/1024).toFixed(0)}KB) — *Full text available in your document context above.*\n`;
+        } else if (att.isImage) {
+          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached. Describe if asked.*\n`;
         } else {
-          const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
+          // Non-PDF text files: include a shorter preview (2000 chars max to save context)
+          const preview = (att.content || "").slice(0, 2000);
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
         }
       }
@@ -1435,11 +1502,15 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
+      const MAX_MSGS = 16; // Reduced to lower memory pressure on weak hardware (Aspire 5)
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
+      // Truncate chat history BEFORE building system prompt to prevent context overflow
+      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
+
+      // ─── STEP 1: Planning — skip when web search is off, for document queries, or simple queries ───
+      // When webSearchOn is false, skip entirely — saves a full LLM call and no data leaves device
       let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
+      if (webSearchOn && !hasDocuments && !isSimpleQuery) {
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -1480,42 +1551,45 @@ Rules:
       // ─── STEP 2: Reviewer agents — run in PARALLEL ───
       const reviewerFindings = [];
       if (researchQuestions.length > 0) {
-        setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
+        // Web searches run in parallel (network I/O), but LLM calls must be sequential
+        // because WebLLM's engine is single-threaded — parallel callAI crashes it
+        setActivityStatus(`Researching ${researchQuestions.length} question(s)...`);
 
-        const reviewerPromises = researchQuestions.map(async (question, i) => {
-          let searchResults = "";
-          try {
-            searchResults = await searchWeb(question);
-          } catch (searchErr) {
-            searchResults = `Search unavailable: ${searchErr.message}`;
-          }
+        // Step A: Fetch all web search results in parallel (network-bound, safe)
+        const searchResults = await Promise.allSettled(
+          researchQuestions.map(async (question) => {
+            try {
+              return { question, results: await searchWeb(question) };
+            } catch (searchErr) {
+              return { question, results: `Search unavailable: ${searchErr.message}` };
+            }
+          })
+        );
+        const searchData = searchResults
+          .filter(r => r.status === "fulfilled")
+          .map(r => r.value);
 
+        // Step B: Run reviewer LLM calls sequentially (engine is single-threaded)
+        for (const { question, results: webResults } of searchData) {
+          if (abortRef.current?.signal?.aborted) break;
+          setActivityStatus(`Reviewing: ${question.slice(0, 50)}...`);
           const reviewerSystem = `You are a web research reviewer assistant. Summarise the most relevant and accurate information. Be concise but specific — include key facts, dates, figures, and URLs where available.`;
           const reviewerMsgs = [
             { role: "system", content: reviewerSystem },
-            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${searchResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
+            { role: "user", content: `Research question: "${question}"\n\nSearch results:\n${webResults}\n\nSummarise the key findings relevant to SMSF or Australian superannuation.` },
           ];
-
           try {
             const { data: reviewerData } = await callAI(reviewerMsgs, { maxTokens: 512, timeoutMs: 30000 });
             if (reviewerData.usage) setUsage(p => ({ i: p.i + (reviewerData.usage.prompt_tokens || 0), o: p.o + (reviewerData.usage.completion_tokens || 0) }));
-            const findings = extractRaw(reviewerData);
-            return { question, findings };
+            reviewerFindings.push({ question, findings: extractRaw(reviewerData) });
           } catch (reviewErr) {
-            return { question, findings: `Reviewer error: ${reviewErr.message}` };
+            reviewerFindings.push({ question, findings: `Reviewer error: ${reviewErr.message}` });
           }
-        });
-
-        const results = await Promise.allSettled(reviewerPromises);
-        for (const r of results) {
-          if (r.status === "fulfilled") reviewerFindings.push(r.value);
         }
       }
 
       // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
       setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
-
-      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
@@ -1539,8 +1613,8 @@ Rules:
       const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
       const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates at 300ms intervals for weak hardware
+      const streamThrottle = createStreamThrottle(setStreamingText, 300);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -1565,13 +1639,19 @@ Rules:
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
+      // Reset KV cache between pipeline stages to free GPU memory on weak hardware
+      try { if (localEngineRef.current?.resetChat) await localEngineRef.current.resetChat(); } catch {}
+
       const REFLECTION_PASSES = hasDocuments ? 2 : 1;
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
-      // Reflection uses reduced maxTokens — response should be similar length to input
-      const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
+      // Reflection maxTokens sized to the main response — no larger than what was already generated
+      const mainResponseTokens = estimateTokens(mainRaw);
+      const reflectionMaxTokens = isSmallModel
+        ? Math.min(Math.max(mainResponseTokens + 256, 1024), mainMaxTokens)
+        : Math.min(Math.max(mainResponseTokens + 512, 1536), mainMaxTokens);
 
       for (let pass = 0; pass < REFLECTION_PASSES; pass++) {
         // ─── Abort check between steps ───
@@ -1606,15 +1686,12 @@ Rules:
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          // No streaming during reflection — saves CPU on weak hardware.
+          // User sees the activity status bar instead.
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
             timeoutMs: 120000,
-            onChunk: (partial) => reflectThrottle.update(partial),
           });
-          reflectThrottle.flush();
-          setStreamingText("");
           if (reflectData.usage) setUsage(p => ({ i: p.i + (reflectData.usage.prompt_tokens || 0), o: p.o + (reflectData.usage.completion_tokens || 0) }));
           const reflectRaw = extractRaw(reflectData);
           // Sanity check: keep memory_update tag integrity — never lose memory
@@ -1641,6 +1718,8 @@ Rules:
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
+        // Reset KV cache before verification to free GPU memory
+        try { if (localEngineRef.current?.resetChat) await localEngineRef.current.resetChat(); } catch {}
         setActivityStatus("Final verification: checking quality of work...");
         const verificationSystem = `You are a final quality gate for an SMSF expert assistant. Answer ONE question: "Did I do good work?"
 
@@ -1690,9 +1769,11 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
         }
       } else if (text) {
         currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
-        const autoMemory = mem.trim()
+        let autoMemory = mem.trim()
           ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
           : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
+        // Cap auto-memory size to prevent context overflow (keep ~8K chars max)
+        if (autoMemory.length > 8000) autoMemory = autoMemory.slice(-8000);
         setMem(autoMemory);
         setMemDraft(autoMemory);
         saveVal(MEMORY_STORAGE_KEY, autoMemory);
@@ -1730,7 +1811,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
       setStreamingText("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs, webSearchOn]);
 
   // ─── Expression image resolver — blink overrides all other states ───
   const getExprImg = useCallback((speakingOverride = false) => {
@@ -1741,7 +1822,18 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
     return "./Expressions/Happy.png";
   }, [isBlinking, busy, expression]);
 
-  const clearChat = () => { setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setErr(null); };
+  const clearChat = () => {
+    setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setErr(null);
+    // Release blob URLs to free memory
+    for (const doc of pdfDocs) {
+      if (doc.blobUrl) try { URL.revokeObjectURL(doc.blobUrl); } catch {}
+    }
+    setPdfDocs([]);
+    setAttachments([]);
+    setStreamingText("");
+    // Reset KV cache to free GPU memory
+    try { if (localEngineRef.current?.resetChat) localEngineRef.current.resetChat(); } catch {}
+  };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ─── Export chat analysis as PDF ───
@@ -1818,7 +1910,11 @@ ${chatHtml}
     const printWin = window.open(url, "_blank");
     if (printWin) {
       printWin.onload = () => {
-        setTimeout(() => { printWin.print(); }, 500);
+        setTimeout(() => {
+          printWin.print();
+          // Revoke after print dialog closes (generous delay)
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        }, 500);
       };
     } else {
       // Fallback: download as HTML
@@ -1826,8 +1922,8 @@ ${chatHtml}
       a.href = url;
       a.download = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
       a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
     }
-    URL.revokeObjectURL(url);
   }, [msgs, pdfDocs, localModelId]);
 
   // ═══ RENDER ═══
@@ -1940,6 +2036,32 @@ ${chatHtml}
               </div>
             </div>
           )}
+
+          {/* ─── Privacy & Web Search ─── */}
+          <div style={{ borderTop: "1px solid var(--bd)", flexShrink: 0, padding: "8px 10px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
+              <span style={{ fontSize: "11px" }}>🔒</span>
+              <span style={{ fontWeight: 700, fontSize: "11px" }}>Privacy</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" }}>
+              <button
+                onClick={() => { const next = !webSearchOn; setWebSearchOn(next); setWebSearchEnabled(next); }}
+                style={{
+                  padding: "3px 8px", fontSize: "9px", borderRadius: "4px", fontFamily: "var(--m)", fontWeight: 600, cursor: "pointer",
+                  border: `1px solid ${webSearchOn ? "rgba(204,153,85,0.3)" : "rgba(124,224,138,0.2)"}`,
+                  background: webSearchOn ? "rgba(204,153,85,0.08)" : "rgba(124,224,138,0.06)",
+                  color: webSearchOn ? "#cc9955" : "var(--ac)",
+                }}
+              >{webSearchOn ? "WEB SEARCH: ON" : "WEB SEARCH: OFF"}</button>
+              <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)", flex: 1, lineHeight: 1.3 }}>
+                {webSearchOn ? "Search queries sent to DuckDuckGo. No documents or chat data is sent." : "Fully offline. Nothing leaves your device."}
+              </span>
+            </div>
+            <div style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)", lineHeight: 1.4, marginTop: "2px" }}>
+              AI runs 100% locally. Documents and chat never leave your computer.
+              {webSearchOn ? " Only search keywords are sent to DuckDuckGo for research." : ""}
+            </div>
+          </div>
 
           {/* ─── Local Model Section ─── */}
           <div style={{ borderTop: "1px solid var(--bd)", flexShrink: 0 }}>
@@ -2138,7 +2260,7 @@ ${chatHtml}
 
         {/* CHAT AREA */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
-          <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px" }}>
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px", overscrollBehavior: "contain" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
                 <img src="./Expressions/Happy.png" alt="Auto" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
@@ -2161,7 +2283,7 @@ ${chatHtml}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {msgs.map((m, i) => {
                 return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "layout style" }}>
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contentVisibility: "auto" }}>
                     {m.role === "assistant" && (
                       <img
                         src="./Expressions/Happy.png"
@@ -2181,12 +2303,13 @@ ${chatHtml}
                   </div>
                 );
               })}
-              {/* Streaming response display — shows text as it generates */}
+              {/* Streaming response display — plain text during streaming to prevent lag on weak hardware */}
+              {/* Full markdown only renders on the final message — saves huge CPU on Aspire 5 class devices */}
               {streamingText && busy && (
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7, wordBreak: "break-word", fontFamily: "var(--f)", fontSize: "13.5px", color: "var(--tx)" }}>{streamingText}</div>
                   </div>
                 </div>
               )}
