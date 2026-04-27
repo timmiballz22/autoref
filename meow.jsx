@@ -86,6 +86,39 @@ const LOCAL_MODELS = [
   },
 ];
 
+function parseApproxSizeToMB(sizeText) {
+  if (!sizeText) return Number.MAX_SAFE_INTEGER;
+  const norm = String(sizeText).replace(/,/g, '').trim();
+  const m = norm.match(/([\d.]+)\s*(KB|MB|GB|TB)/i);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const value = parseFloat(m[1]);
+  if (!Number.isFinite(value)) return Number.MAX_SAFE_INTEGER;
+  const unit = m[2].toUpperCase();
+  const scale = unit === 'KB' ? 1 / 1024 : unit === 'MB' ? 1 : unit === 'GB' ? 1024 : 1024 * 1024;
+  return value * scale;
+}
+
+function getLightestQwenModelId() {
+  const qwen = LOCAL_MODELS.filter(m => /qwen/i.test(m.id) || /qwen/i.test(m.name));
+  if (qwen.length === 0) return LOCAL_MODELS[0]?.id || null;
+  return qwen.slice().sort((a, b) => parseApproxSizeToMB(a.size) - parseApproxSizeToMB(b.size))[0].id;
+}
+
+async function isModelCached(modelId) {
+  if (!modelId || !('caches' in window)) return false;
+  try {
+    const cacheKeys = await caches.keys();
+    const baseId = modelId.replace(/-MLC$/, '');
+    for (const cacheName of cacheKeys) {
+      const cache = await caches.open(cacheName);
+      const reqs = await cache.keys();
+      if (reqs.some(r => r.url.includes(modelId) || r.url.includes(baseId))) return true;
+    }
+  } catch {}
+  return false;
+}
+
+
 // ─── Build WebLLM engine config with expanded context window ───
 // IMPORTANT: model_lib must be a real URL to a .wasm file. Hand-rolling the
 // config (model_lib: modelId) makes WebLLM fetch a relative path, which the
@@ -100,14 +133,26 @@ function buildEngineConfig(webllm, modelId) {
   if (!list) return undefined; // fall back to WebLLM's default appConfig
   const entry = list.find(e => e.model_id === modelId);
   if (!entry) return undefined; // model not in prebuilt list — let WebLLM use default
+
+  const baseOverrides = { ...(entry.overrides || {}) };
+  const hasPositiveSliding = Number(baseOverrides.sliding_window_size) > 0;
+  const hasPositiveContext = Number(baseOverrides.context_window_size) > 0;
+
+  // WebLLM requires exactly one positive window at runtime:
+  // either context_window_size OR sliding_window_size.
+  // Keep the model's native attention mode and disable the other one.
+  const useSlidingWindow = hasPositiveSliding && !hasPositiveContext;
+  const resolvedContext = useSlidingWindow ? -1 : modelDef.contextWindow;
+  const resolvedSliding = useSlidingWindow ? modelDef.slidingWindow : -1;
+
   return {
     ...prebuilt,
     model_list: [{
       ...entry,
       overrides: {
-        ...(entry.overrides || {}),
-        context_window_size: modelDef.contextWindow,
-        sliding_window_size: modelDef.slidingWindow,
+        ...baseOverrides,
+        context_window_size: resolvedContext,
+        sliding_window_size: resolvedSliding,
         prefill_chunk_size: modelDef.prefillChunk,
       },
     }],
@@ -738,13 +783,17 @@ function Auto() {
         setMsgs(withIds);
       }
     });
-    // Auto-load previously downloaded local model
+    // Auto-select previously used model; if none, prefer the lightest Qwen model.
     (async () => {
       const savedId = await loadVal(LOCAL_MODEL_KEY);
-      if (savedId && LOCAL_MODELS.find(m => m.id === savedId)) {
-        setLocalModelId(savedId);
-        setLocalModelStatus("cached");
-      }
+      const qwenDefault = getLightestQwenModelId();
+      const preferredId = (savedId && LOCAL_MODELS.find(m => m.id === savedId)) ? savedId : qwenDefault;
+      if (!preferredId) return;
+      setLocalModelId(preferredId);
+      saveVal(LOCAL_MODEL_KEY, preferredId);
+      const cached = await isModelCached(preferredId);
+      setLocalModelStatus(cached ? "cached" : "idle");
+      if (!cached) setLocalModelProgressText("No cache found for selected model. Auto-download will start.");
     })();
   }, []);
 
@@ -959,6 +1008,17 @@ function Auto() {
       setLocalModelProgressText(describeLoadError(e));
     }
   }, [localModelId]);
+
+  const bootstrapDownloadAttemptedRef = useRef(false);
+  useEffect(() => {
+    const qwenDefault = getLightestQwenModelId();
+    if (!qwenDefault) return;
+    if (localModelId !== qwenDefault) return;
+    if (localModelStatus !== "idle") return;
+    if (bootstrapDownloadAttemptedRef.current) return;
+    bootstrapDownloadAttemptedRef.current = true;
+    downloadLocalModel();
+  }, [localModelId, localModelStatus, downloadLocalModel]);
 
   const deleteLocalModel = useCallback(async () => {
     if (!window.confirm(`Delete cached model "${localModelId}"? You will need to re-download it to use it again.`)) return;
