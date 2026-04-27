@@ -258,9 +258,7 @@ function extractQueryTerms(query) {
 
 // ─── Persistent Storage ───
 const CHAT_STORAGE_KEY = "auto-chat";
-const LEGACY_CHAT_STORAGE_KEY = "meow-chat";
 const MEMORY_STORAGE_KEY = "auto-memory";
-const LEGACY_MEMORY_STORAGE_KEY = "meow-memory";
 
 async function loadVal(key, legacyKey = null) {
   let value = "";
@@ -310,13 +308,7 @@ async function loadChat() {
   const current = parseChat(await loadVal(CHAT_STORAGE_KEY));
   if (current?.length) return current;
 
-  const legacy = parseChat(await loadVal(LEGACY_CHAT_STORAGE_KEY));
-  if (legacy?.length) {
-    saveChat(legacy);
-    return legacy;
-  }
-
-  return current || legacy || [];
+  return current || [];
 }
 async function saveChat(msgs) {
   // Only save user/assistant messages, skip system research messages, cap at 100
@@ -597,7 +589,7 @@ const ChatMessage = React.memo(function ChatMessage({ msg }) {
   return (
     <div style={{ alignSelf: msg.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: msg.role === "user" ? "row-reverse" : "row", contain: "layout style paint" }}>
       {msg.role === "assistant" && (
-        <img src="./Expressions/Happy.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+        <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
       )}
       <div style={{ background: msg.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
         {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
@@ -743,7 +735,6 @@ function Auto() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
   const [activityStatus, setActivityStatus] = useState("");
-  const [expression, setExpression] = useState("happy"); // "happy" | "serious" | "veryHappy"
   const [isBlinking, setIsBlinking] = useState(false);
   const blinkRef = useRef(null);
   const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
@@ -773,7 +764,7 @@ function Auto() {
 
   // Load on mount — always target the lightest default model first
   useEffect(() => {
-    loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
+    loadVal(MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => {
       if (v?.length) {
         // Validate loaded messages: each must have role + string content (prevents render crashes from corrupted data)
@@ -1330,15 +1321,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 - (CRITICAL) Think outside the box, there may be more than one solution
 Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
 
-    s += `
-
-## Expressions
-You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
-- <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
-- <expression>serious</expression> — use when thinking deeply, explaining complex topics, giving warnings, or discussing serious matters
-- <expression>veryHappy</expression> — use when celebrating, super excited, receiving amazing news, completing a big task successfully, or when the user achieves something great
-
-Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
+    s += ``;
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
@@ -1355,66 +1338,56 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     return s;
   }, [mem, pdfDocs, localModelId]);
 
-  // ─── Parse AI response (memory updates, expressions, terminal commands) ───
+  // ─── Parse AI response (memory updates and terminal commands) ───
   const parseResponse = useCallback((text) => {
     // Safety: ensure we always work with a string
-    if (!text || typeof text !== "string") return { text: String(text || ""), actions: { memoryUpdate: null, expression: null, terminalCommands: [] } };
+    if (!text || typeof text !== "string") return { text: String(text || ""), actions: { memoryUpdate: null, terminalCommands: [] } };
     try {
-    let cleaned = text;
-    const actions = { memoryUpdate: null, expression: null, terminalCommands: [] };
+      let cleaned = text;
+      const actions = { memoryUpdate: null, terminalCommands: [] };
 
-    // Extract expression tag (case-insensitive to handle AI casing variations)
-    const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/i);
-    if (exprMatch) {
-      const expr = exprMatch[1].trim().toLowerCase();
-      if (expr === "serious" || expr === "happy" || expr === "veryhappy" || expr === "very happy") {
-        actions.expression = (expr === "veryhappy" || expr === "very happy") ? "veryHappy" : expr;
+      // Extract memory updates (case-insensitive to handle AI casing variations)
+      const memMatch = cleaned.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
+      if (memMatch) {
+        actions.memoryUpdate = memMatch[1].trim();
+        cleaned = cleaned.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, "").trim();
       }
-      cleaned = cleaned.replace(/<expression>[\s\S]*?<\/expression>/gi, "").trim();
-    }
 
-    // Extract memory updates (case-insensitive to handle AI casing variations)
-    const memMatch = cleaned.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
-    if (memMatch) {
-      actions.memoryUpdate = memMatch[1].trim();
-      cleaned = cleaned.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, "").trim();
-    }
+      // Extract and strip skill invocations (informational, skills are auto-injected)
+      cleaned = cleaned.replace(/<use_skill>[\s\S]*?<\/use_skill>/g, "").trim();
 
-    // Extract and strip skill invocations (informational, skills are auto-injected)
-    cleaned = cleaned.replace(/<use_skill>[\s\S]*?<\/use_skill>/g, "").trim();
+      // Strip <file type="memory"> tags that some models emit (should not be displayed)
+      cleaned = cleaned.replace(/<file\b[^>]*>[\s\S]*?<\/file>/gi, "").trim();
 
-    // Strip <file type="memory"> tags that some models emit (should not be displayed)
-    cleaned = cleaned.replace(/<file\b[^>]*>[\s\S]*?<\/file>/gi, "").trim();
+      // Strip deprecated web and browser tags from the visible response
+      cleaned = cleaned
+        .replace(/<web_search>[\s\S]*?<\/web_search>/g, "")
+        .replace(/<read_url>[\s\S]*?<\/read_url>/g, "")
+        .replace(/<open_browser>[\s\S]*?<\/open_browser>/g, "")
+        .replace(/<browser_navigate>[\s\S]*?<\/browser_navigate>/g, "")
+        .replace(/<browser_click>[\s\S]*?<\/browser_click>/g, "")
+        .replace(/<browser_type>[\s\S]*?<\/browser_type>/g, "")
+        .replace(/<browser_read\s*\/?>/g, "")
+        .replace(/<browser_read>[\s\S]*?<\/browser_read>/g, "")
+        .replace(/<browser_scroll>[\s\S]*?<\/browser_scroll>/g, "")
+        .replace(/<browser_find>[\s\S]*?<\/browser_find>/g, "")
+        .replace(/<browser_new_tab>[\s\S]*?<\/browser_new_tab>/g, "")
+        .replace(/<browser_close_tab>[\s\S]*?<\/browser_close_tab>/g, "")
+        .replace(/<browser_switch_tab>[\s\S]*?<\/browser_switch_tab>/g, "")
+        .replace(/<web_read\s*\/?>/g, "")
+        .replace(/<web_read>[\s\S]*?<\/web_read>/g, "")
+        .trim();
 
-    // Strip deprecated web and browser tags from the visible response
-    cleaned = cleaned
-      .replace(/<web_search>[\s\S]*?<\/web_search>/g, "")
-      .replace(/<read_url>[\s\S]*?<\/read_url>/g, "")
-      .replace(/<open_browser>[\s\S]*?<\/open_browser>/g, "")
-      .replace(/<browser_navigate>[\s\S]*?<\/browser_navigate>/g, "")
-      .replace(/<browser_click>[\s\S]*?<\/browser_click>/g, "")
-      .replace(/<browser_type>[\s\S]*?<\/browser_type>/g, "")
-      .replace(/<browser_read\s*\/?>/g, "")
-      .replace(/<browser_read>[\s\S]*?<\/browser_read>/g, "")
-      .replace(/<browser_scroll>[\s\S]*?<\/browser_scroll>/g, "")
-      .replace(/<browser_find>[\s\S]*?<\/browser_find>/g, "")
-      .replace(/<browser_new_tab>[\s\S]*?<\/browser_new_tab>/g, "")
-      .replace(/<browser_close_tab>[\s\S]*?<\/browser_close_tab>/g, "")
-      .replace(/<browser_switch_tab>[\s\S]*?<\/browser_switch_tab>/g, "")
-      .replace(/<web_read\s*\/?>/g, "")
-      .replace(/<web_read>[\s\S]*?<\/web_read>/g, "")
-      .trim();
+      // Strip any remaining compatibility wrappers from display text
+      cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
 
-    // Strip any remaining compatibility wrappers from display text
-    cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+      // Strip any stray <function=...> tags that weren't inside a <tool_call>
+      cleaned = cleaned.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "").trim();
 
-    // Strip any stray <function=...> tags that weren't inside a <tool_call>
-    cleaned = cleaned.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "").trim();
-
-    return { text: cleaned, actions };
+      return { text: cleaned, actions };
     } catch (err) {
       console.warn("parseResponse error:", err);
-      return { text: String(text), actions: { memoryUpdate: null, expression: null, terminalCommands: [] } };
+      return { text: String(text), actions: { memoryUpdate: null, terminalCommands: [] } };
     }
   }, []);
 
@@ -1727,7 +1700,7 @@ Rules:
       const REFLECTION_PASSES = isSmallModelSend ? 1 : (hasDocuments ? 2 : 1);
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
+        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
       ];
       // Reflection uses reduced maxTokens — response should be similar length to input
       const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
@@ -1753,7 +1726,7 @@ ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pag
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <expression>, <memory_update> blocks — this is CRITICAL, do not lose them
+2. PRESERVE ALL tags exactly: <memory_update> blocks — this is CRITICAL, do not lose them
 3. If the response is already excellent for this check, output it unchanged
 4. Make ONLY improvements related to your focus area — do not degrade other aspects
 5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
@@ -1809,11 +1782,11 @@ Review this SMSF expert response and check:
 2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
 3. Are there any compliance issues, misleading statements, or incorrect legislative references?
 4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <expression> and <memory_update> tags present and intact?
+5. Are all <memory_update> tags present and intact?
 
 If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
 If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
+CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
 
         const verifyMsgs = [
           { role: "system", content: verificationSystem },
@@ -1838,8 +1811,6 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
 
       // ─── Finalise: parse response and update state ───
       const { text, actions } = parseResponse(finalRaw);
-
-      if (actions.expression) setExpression(actions.expression);
 
       if (actions.memoryUpdate) {
         setMem(actions.memoryUpdate);
@@ -1872,7 +1843,6 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
               currentMsgs = [...currentMsgs, { role: "assistant", content: partialText + `\n\n---\n*⚠ Partial response — review pipeline was interrupted: ${e.message}*`, _id: nextMsgId() }];
               setMsgs([...currentMsgs]);
               saveChat(currentMsgs);
-              if (partialActions.expression) setExpression(partialActions.expression);
               if (partialActions.memoryUpdate) {
                 setMem(partialActions.memoryUpdate);
                 setMemDraft(partialActions.memoryUpdate);
@@ -1892,16 +1862,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
     }
   }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
 
-  // ─── Expression image resolver — blink overrides all other states ───
-  const getExprImg = useCallback((speakingOverride = false) => {
-    if (isBlinking) return "./Expressions/Blink.png";
-    if (speakingOverride || busy) return "./Expressions/HappySpeak.png";
-    if (expression === "serious") return "./Expressions/Serious.png";
-    if (expression === "veryHappy") return "./Expressions/VeryHappy.png";
-    return "./Expressions/Happy.png";
-  }, [isBlinking, busy, expression]);
-
-  const clearChat = () => { setMsgs([]); saveChat([]); clearVal(LEGACY_CHAT_STORAGE_KEY); setErr(null); };
+  const clearChat = () => { setMsgs([]); saveChat([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ─── Export chat analysis as PDF ───
@@ -2065,7 +2026,7 @@ ${chatHtml}
                 <button onClick={saveMem} style={btn("#7ce08a")}>Save</button>
                 <button onClick={downloadMem} style={btn("#88bbcc")}>Download .txt</button>
                 <button onClick={uploadMem} style={btn("#88bbcc")}>Upload</button>
-                <button onClick={() => { setMemDraft(""); setMem(""); saveVal(MEMORY_STORAGE_KEY, ""); clearVal(LEGACY_MEMORY_STORAGE_KEY); }} style={btn("#cc7777")}>Clear</button>
+                <button onClick={() => { setMemDraft(""); setMem(""); saveVal(MEMORY_STORAGE_KEY, ""); }} style={btn("#cc7777")}>Clear</button>
               </div>
               <div style={{ padding: "6px 12px 8px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
                 {mem.length} chars · ~{Math.ceil(mem.length / 3.8)} tokens · Saved to memory.txt
@@ -2272,12 +2233,7 @@ ${chatHtml}
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <img
-              src="./Expressions/Happy.png"
-              alt="Auto"
-              style={{ width: "32px", height: "32px", borderRadius: "7px", objectFit: "cover", imageRendering: "pixelated" }}
-              onError={(e) => { e.target.style.display = "none"; }}
-            />
+            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block" }} />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
             <span style={{ fontSize: "10px", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
               {localModelStatus === "ready"
@@ -2317,7 +2273,7 @@ ${chatHtml}
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
-                <img src="./Expressions/Happy.png" alt="Auto" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                <span style={{ width: "24px", height: "24px", borderRadius: "999px", background: "var(--ac)", display: "inline-block" }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Auto</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "500px", lineHeight: 1.6 }}>
                   SMSF document analysis assistant — runs fully offline.<br/>
@@ -2354,7 +2310,7 @@ ${chatHtml}
               {/* Streaming response display — shows text as it generates */}
               {streamingText && busy && (
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
-                  <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                  <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
                     <MemoMd text={streamingText} />
                   </div>
@@ -2362,7 +2318,7 @@ ${chatHtml}
               )}
               {busy && (
                 <div style={{ opacity: .6, fontSize: "12px", padding: "6px 2px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "24px", height: "24px", imageRendering: "pixelated", animation: "bounce 1s infinite" }} onError={(e) => { e.target.style.display = "none"; }} />
+                  <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", animation: "bounce 1s infinite" }} />
                   <span style={{ animation: "bounce 1s infinite" }}>Thinking…</span>
                   {activityStatus && <span style={{ color: "var(--ac2)", fontFamily: "var(--m)", fontSize: "10px" }}>{activityStatus}</span>}
                 </div>
@@ -2373,20 +2329,7 @@ ${chatHtml}
             </div>
           </div>
 
-          {/* ═══ AUTO EXPRESSION DISPLAY ═══ */}
-          {/* Keep background/border hidden so the expression floats above the input */}
-          <div style={{ padding: "6px 14px 2px", borderTop: "none", background: "transparent" }}>
-            <img
-              src={getExprImg(busy)}
-              alt="Auto"
-              style={{
-                width: "80px", height: "80px", imageRendering: "pixelated",
-              }}
-              onError={(e) => { e.target.style.display = "none"; }}
-            />
-          </div>
-
-          {/* INPUT */}
+          {/* INPUT */}}
           <div style={{ padding: "10px 20px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
             {/* Attachment preview chips */}
             {attachments.length > 0 && (
@@ -2636,7 +2579,7 @@ class ErrorBoundary extends React.Component {
       return React.createElement("div", {
         style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
       },
-        React.createElement("div", { style: { fontSize: "40px" } }, "\uD83D\uDE3F"),
+        React.createElement("div", { style: { fontSize: "40px" } }, "⚠️"),
         React.createElement("h2", { style: { color: "#e88", margin: 0 } }, "Auto encountered an error"),
         React.createElement("pre", { style: { color: "#888", fontSize: "12px", maxWidth: "600px", overflow: "auto", padding: "12px", background: "#0a0a12", borderRadius: "8px", border: "1px solid #181824" } },
           String(this.state.error)
@@ -2652,11 +2595,9 @@ class ErrorBoundary extends React.Component {
           onClick: () => {
             try {
               window.storage && window.storage.set(CHAT_STORAGE_KEY, "[]");
-              window.storage && window.storage.set(LEGACY_CHAT_STORAGE_KEY, "[]");
             } catch(e) {}
             try {
               window.localStorage.setItem(CHAT_STORAGE_KEY, "[]");
-              window.localStorage.setItem(LEGACY_CHAT_STORAGE_KEY, "[]");
             } catch(e) {}
             this.setState({ hasError: false, error: null, retryCount: 0 });
           },
