@@ -1405,10 +1405,23 @@ Even for simple greetings, update memory with at least the conversation timestam
       content: typeof m.content === "string" ? m.content : String(m.content),
     }));
 
-    // Timeout wrapper
-    const withTimeout = (promise) => {
+    const tryInterruptGeneration = async () => {
+      try {
+        // WebLLM versions differ; keep compatibility with optional calls.
+        await localEngineRef.current?.interruptGenerate?.();
+      } catch {}
+      try {
+        await localEngineRef.current?.interrupt?.();
+      } catch {}
+    };
+
+    // Timeout wrapper (attempts to stop in-flight generation)
+    const withTimeout = (promise, label = "LLM call") => {
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("LLM call timed out — try a shorter query or simpler model")), timeoutMs);
+        const timer = setTimeout(async () => {
+          await tryInterruptGeneration();
+          reject(new Error(`${label} timed out — try a shorter query or simpler model`));
+        }, timeoutMs);
         promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
       });
     };
@@ -1434,7 +1447,22 @@ Even for simple greetings, update memory with at least the conversation timestam
         let content = "";
         let usage = { prompt_tokens: 0, completion_tokens: 0 };
         try {
-          for await (const chunk of stream) {
+          const iterator = stream[Symbol.asyncIterator]();
+          // Idle timeout: only fail when generation stalls, not while healthy tokens are arriving.
+          const stallTimeoutMs = Math.max(15000, Math.min(120000, Math.floor(timeoutMs * 0.4)));
+          while (true) {
+            if (abortRef.current?.signal?.aborted) {
+              await tryInterruptGeneration();
+              throw new DOMException("Aborted", "AbortError");
+            }
+            const nextChunk = await Promise.race([
+              iterator.next(),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("LLM stream stalled — try a shorter query or simpler model")), stallTimeoutMs)
+              ),
+            ]);
+            if (nextChunk.done) break;
+            const chunk = nextChunk.value;
             const delta = chunk.choices?.[0]?.delta?.content || "";
             if (delta) {
               content += delta;
@@ -1458,11 +1486,12 @@ Even for simple greetings, update memory with at least the conversation timestam
         }
         return { content, usage };
       } else {
-        const resp = await engine.chat.completions.create({
+        if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const resp = await withTimeout(engine.chat.completions.create({
           messages: safeMsgs,
           temperature: 0.7,
           max_tokens: maxTokens,
-        });
+        }), "LLM call");
         const content = resp.choices?.[0]?.message?.content || "";
         return {
           content,
@@ -1472,7 +1501,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     };
 
     try {
-      const { content, usage } = await withTimeout(doCall(localEngineRef.current));
+      const { content, usage } = await withTimeout(doCall(localEngineRef.current), "LLM call");
       return {
         data: {
           choices: [{ message: { content } }],
@@ -1482,11 +1511,14 @@ Even for simple greetings, update memory with at least the conversation timestam
       };
     } catch (e) {
       if (e.name === "AbortError") throw e;
+      if (e.message && /timed out|stalled/i.test(e.message)) {
+        throw new Error("Local model error: LLM call timed out — try a shorter query, fewer uploaded pages, or a simpler model.");
+      }
       // Handle the specific "model not loaded" error — attempt reload
       if (e.message && e.message.includes("not loaded")) {
         try {
           await localEngineRef.current.reload(localModelId);
-          const { content, usage } = await withTimeout(doCall(localEngineRef.current));
+          const { content, usage } = await withTimeout(doCall(localEngineRef.current), "LLM call");
           return {
             data: {
               choices: [{ message: { content } }],
