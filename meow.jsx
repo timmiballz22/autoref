@@ -771,7 +771,7 @@ function Auto() {
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
 
-  // Load on mount — auto-load previously cached model
+  // Load on mount — always target the lightest default model first
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => {
@@ -783,15 +783,14 @@ function Auto() {
         setMsgs(withIds);
       }
     });
-    // Auto-select previously used model; if none, prefer the lightest Qwen model.
+    // Always auto-select the lightest Qwen model at startup so we do not
+    // accidentally auto-load a previously saved heavier model.
     (async () => {
-      const savedId = await loadVal(LOCAL_MODEL_KEY);
       const qwenDefault = getLightestQwenModelId();
-      const preferredId = (savedId && LOCAL_MODELS.find(m => m.id === savedId)) ? savedId : qwenDefault;
-      if (!preferredId) return;
-      setLocalModelId(preferredId);
-      saveVal(LOCAL_MODEL_KEY, preferredId);
-      const cached = await isModelCached(preferredId);
+      if (!qwenDefault) return;
+      setLocalModelId(qwenDefault);
+      saveVal(LOCAL_MODEL_KEY, qwenDefault);
+      const cached = await isModelCached(qwenDefault);
       setLocalModelStatus(cached ? "cached" : "idle");
       if (!cached) setLocalModelProgressText("No cache found for selected model. Auto-download will start.");
     })();
