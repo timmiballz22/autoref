@@ -87,21 +87,49 @@ const LOCAL_MODELS = [
 ];
 
 // ─── Build WebLLM engine config with expanded context window ───
-function buildEngineConfig(modelId) {
+// IMPORTANT: model_lib must be a real URL to a .wasm file. Hand-rolling the
+// config (model_lib: modelId) makes WebLLM fetch a relative path, which the
+// host returns as the SPA index.html — WebAssembly.instantiate then fails
+// with "expected magic word 00 61 73 6d, found 3c 21 44 4f" (i.e. "<!DO" from
+// "<!DOCTYPE"). We clone the prebuilt entry instead so URLs are correct.
+function buildEngineConfig(webllm, modelId) {
   const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
-  if (!modelDef) return {};
+  if (!modelDef) return undefined;
+  const prebuilt = webllm && webllm.prebuiltAppConfig;
+  const list = prebuilt && Array.isArray(prebuilt.model_list) ? prebuilt.model_list : null;
+  if (!list) return undefined; // fall back to WebLLM's default appConfig
+  const entry = list.find(e => e.model_id === modelId);
+  if (!entry) return undefined; // model not in prebuilt list — let WebLLM use default
   return {
+    ...prebuilt,
     model_list: [{
-      model: `https://huggingface.co/mlc-ai/${modelId}`,
-      model_id: modelId,
-      model_lib: modelId,
+      ...entry,
       overrides: {
+        ...(entry.overrides || {}),
         context_window_size: modelDef.contextWindow,
         sliding_window_size: modelDef.slidingWindow,
         prefill_chunk_size: modelDef.prefillChunk,
       },
     }],
   };
+}
+
+// Translate WebLLM/WASM errors into actionable messages
+function describeLoadError(e) {
+  const msg = (e && e.message) || String(e || "");
+  if (/magic word|found 3c 21 44 4f|<!DOCTYPE|expected magic/i.test(msg)) {
+    return "Model library (.wasm) URL returned HTML instead of a WebAssembly module. This usually means the host is offline, blocking huggingface.co/raw.githubusercontent.com, or a proxy is rewriting requests. Check your network/firewall and try again.";
+  }
+  if (/Failed to fetch|NetworkError|ERR_INTERNET_DISCONNECTED/i.test(msg)) {
+    return "Network error while downloading the model. Check your internet connection and retry.";
+  }
+  if (/WebGPU|navigator\.gpu/i.test(msg)) {
+    return "WebGPU not available. Use Chrome 113+ or Edge 113+, and ensure hardware acceleration is enabled.";
+  }
+  if (/out of memory|OOM|allocation/i.test(msg)) {
+    return "GPU ran out of memory. Close other tabs, remove uploaded documents, or pick a smaller model (Qwen 0.5B).";
+  }
+  return msg || "Unknown error";
 }
 
 // ─── Estimate token count from text (conservative ~3.2 chars per token to prevent OOM) ───
@@ -704,21 +732,22 @@ function Auto() {
         setLocalModelProgressText("Auto-loading model from cache...");
         try {
           const webllm = await getWebLLM();
-          const engineCfg = buildEngineConfig(localModelId);
-          const engine = await webllm.CreateMLCEngine(localModelId, {
-            appConfig: engineCfg,
+          const engineCfg = buildEngineConfig(webllm, localModelId);
+          const engineOpts = {
             initProgressCallback: (p) => {
               setLocalModelProgress(Math.round((p.progress || 0) * 100));
               setLocalModelProgressText(p.text || "");
             },
-          });
+          };
+          if (engineCfg) engineOpts.appConfig = engineCfg;
+          const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
           localEngineRef.current = engine;
           setLocalModelStatus("ready");
           setUseLocalModel(true);
         } catch (e) {
           console.error("Auto-load from cache failed:", e);
           setLocalModelStatus("cached");
-          setLocalModelProgressText("Auto-load failed — click Load to try again. " + e.message);
+          setLocalModelProgressText("Auto-load failed — click Load to try again. " + describeLoadError(e));
         }
       })();
     }
@@ -833,15 +862,19 @@ function Auto() {
     setLocalModelProgress(0);
     setLocalModelProgressText("Fetching WebLLM engine...");
     try {
+      // Release any prior engine's GPU resources before allocating a new one
+      try { await localEngineRef.current?.unload?.(); } catch {}
+      localEngineRef.current = null;
       const webllm = await getWebLLM();
-      const engineCfg = buildEngineConfig(localModelId);
-      const engine = await webllm.CreateMLCEngine(localModelId, {
-        appConfig: engineCfg,
+      const engineCfg = buildEngineConfig(webllm, localModelId);
+      const engineOpts = {
         initProgressCallback: (p) => {
           setLocalModelProgress(Math.round((p.progress || 0) * 100));
           setLocalModelProgressText(p.text || "");
         },
-      });
+      };
+      if (engineCfg) engineOpts.appConfig = engineCfg;
+      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
@@ -849,7 +882,7 @@ function Auto() {
     } catch (e) {
       console.error("Local model download failed:", e);
       setLocalModelStatus("error");
-      setLocalModelProgressText(e.message || "Download failed");
+      setLocalModelProgressText(describeLoadError(e));
     }
   }, [localModelId]);
 
@@ -863,28 +896,33 @@ function Auto() {
     setLocalModelProgress(0);
     setLocalModelProgressText("Loading from cache...");
     try {
+      try { await localEngineRef.current?.unload?.(); } catch {}
+      localEngineRef.current = null;
       const webllm = await getWebLLM();
-      const engineCfg = buildEngineConfig(localModelId);
-      const engine = await webllm.CreateMLCEngine(localModelId, {
-        appConfig: engineCfg,
+      const engineCfg = buildEngineConfig(webllm, localModelId);
+      const engineOpts = {
         initProgressCallback: (p) => {
           setLocalModelProgress(Math.round((p.progress || 0) * 100));
           setLocalModelProgressText(p.text || "");
         },
-      });
+      };
+      if (engineCfg) engineOpts.appConfig = engineCfg;
+      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
     } catch (e) {
       console.error("Local model load failed:", e);
       setLocalModelStatus("error");
-      setLocalModelProgressText(e.message || "Load failed");
+      setLocalModelProgressText(describeLoadError(e));
     }
   }, [localModelId]);
 
   const deleteLocalModel = useCallback(async () => {
     if (!window.confirm(`Delete cached model "${localModelId}"? You will need to re-download it to use it again.`)) return;
     try {
+      // Release GPU resources before clearing the cache
+      try { await localEngineRef.current?.unload?.(); } catch {}
       localEngineRef.current = null;
       setUseLocalModel(false);
       // Remove from all caches
@@ -1969,8 +2007,10 @@ ${chatHtml}
                     key={m.id}
                     onClick={async () => {
                       if (locked) return;
-                      // Unload current engine
+                      // Unload current engine — release GPU resources, not just clear ref
+                      try { await localEngineRef.current?.unload?.(); } catch {}
                       localEngineRef.current = null;
+                      autoLoadAttemptedRef.current = false;
                       setUseLocalModel(false);
                       setLocalModelId(m.id);
                       setLocalModelProgress(0);
