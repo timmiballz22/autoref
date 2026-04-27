@@ -20,7 +20,7 @@ async function getWebLLM() {
 }
 
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
-function createStreamThrottle(setState, intervalMs = 120) {
+function createStreamThrottle(setState, intervalMs = 180) {
   let pending = null;
   let timer = null;
   return {
@@ -543,6 +543,29 @@ function il(t) {
 // ─── Memoised Markdown — prevents re-render of all messages during streaming ───
 const MemoMd = React.memo(Md);
 
+// ─── Unique message ID generator ───
+let _msgIdCounter = 0;
+function nextMsgId() { return "m" + (++_msgIdCounter) + "-" + Date.now(); }
+
+// ─── Memoised single chat message — prevents re-rendering every message on each state change ───
+const ChatMessage = React.memo(function ChatMessage({ msg }) {
+  return (
+    <div style={{ alignSelf: msg.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: msg.role === "user" ? "row-reverse" : "row", contain: "layout style paint" }}>
+      {msg.role === "assistant" && (
+        <img src="./Expressions/Happy.png" alt="" style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+      )}
+      <div style={{ background: msg.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
+        {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
+        {msg.role === "assistant" && (
+          <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+            <button onClick={() => { try { navigator.clipboard.writeText(msg.content); } catch {} }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.15)", color: "var(--dm)", cursor: "pointer", fontSize: "9px", padding: "2px 6px", borderRadius: "3px", fontFamily: "var(--m)" }}>Copy</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 // ─── PDF Viewer Component ───
 function PdfViewer({ pdfData, blobUrl, onClose }) {
   const [currentPage, setCurrentPage] = useState(1);
@@ -695,6 +718,7 @@ function Auto() {
   const [localModelProgressText, setLocalModelProgressText] = useState("");
   const [useLocalModel, setUseLocalModel] = useState(false);
   const [pdfDocs, setPdfDocs] = useState([]); // [{name, text, pageCount, pageImages, blobUrl}]
+  const [pdfLoading, setPdfLoading] = useState([]); // [{name, progress, total}] — PDFs being extracted
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
   const [pdfViewerIdx, setPdfViewerIdx] = useState(0); // which pdf to view
   const [docTextViewerOpen, setDocTextViewerOpen] = useState(false); // full extracted text viewer
@@ -705,7 +729,15 @@ function Auto() {
   // Load on mount — auto-load previously cached model
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY, LEGACY_MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
-    loadChat().then(v => { if (v?.length) setMsgs(v); });
+    loadChat().then(v => {
+      if (v?.length) {
+        // Validate loaded messages: each must have role + string content (prevents render crashes from corrupted data)
+        const valid = v.filter(m => m && typeof m.role === "string" && (m.role === "user" || m.role === "assistant") && typeof m.content === "string");
+        // Assign stable IDs to loaded messages
+        const withIds = valid.map(m => m._id ? m : { ...m, _id: nextMsgId() });
+        setMsgs(withIds);
+      }
+    });
     // Auto-load previously downloaded local model
     (async () => {
       const savedId = await loadVal(LOCAL_MODEL_KEY);
@@ -756,6 +788,16 @@ function Auto() {
       autoLoadAttemptedRef.current = false;
     }
   }, [localModelStatus, localModelId]);
+
+  // Cleanup blob URLs when pdfDocs change or unmount (prevents memory leak)
+  const prevBlobUrlsRef = useRef([]);
+  useEffect(() => {
+    const currentUrls = pdfDocs.map(d => d.blobUrl).filter(Boolean);
+    const removed = prevBlobUrlsRef.current.filter(u => !currentUrls.includes(u));
+    removed.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
+    prevBlobUrlsRef.current = currentUrls;
+    return () => { currentUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch {} }); };
+  }, [pdfDocs]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -1036,6 +1078,8 @@ function Auto() {
           if (prev.length >= MAX_ATTACHMENTS) return prev;
           return [...prev, { name: file.name, type: "application/pdf", content: "", size: file.size, isPdf: true, pageCount: 0, pageImages: [], _loading: true, _id: placeholderId }];
         });
+        // Track loading PDF in sidebar so user sees it immediately
+        setPdfLoading(prev => [...prev, { name: file.name, progress: 0, total: 0 }]);
         // Auto-open sidebar so user sees the document will appear there
         setSidebarOpen(true);
 
@@ -1047,6 +1091,7 @@ function Auto() {
             setActivityStatus(`Extracting PDF: ${file.name}...`);
             const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name, (current, total) => {
               setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
+              setPdfLoading(prev => prev.map(p => p.name === file.name ? { ...p, progress: current, total } : p));
             });
             setActivityStatus("");
             // Replace loading placeholder with real extracted content
@@ -1058,12 +1103,15 @@ function Auto() {
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
             const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
             setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Remove from loading tracker
+            setPdfLoading(prev => prev.filter(p => p.name !== file.name));
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
             setActivityStatus("");
             // Remove the loading placeholder on failure
             setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+            setPdfLoading(prev => prev.filter(p => p.name !== file.name));
           }
         };
         reader.readAsArrayBuffer(file);
@@ -1233,9 +1281,12 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
-    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU) ───
+    // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
+    // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
+    // Larger models: 50% cap — leaves room for chat history + generation
     const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * 0.55) : 14000;
+    const isSmallCap = modelDefCap && modelDefCap.contextWindow <= 32768;
+    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * (isSmallCap ? 0.35 : 0.50)) : 11000;
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -1312,10 +1363,15 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   // Options: { maxTokens, onChunk, timeoutMs }
   const callAI = useCallback(async (apiMsgs, opts = {}) => {
     const { maxTokens = 4096, onChunk = null, timeoutMs = 90000 } = opts;
-    // Validate engine is loaded
+    // Validate engine is loaded and healthy
     if (!localEngineRef.current) {
       throw new Error("No model loaded. Please download and load a local model from the sidebar before sending messages.");
     }
+    // Validate messages before sending — corrupted messages crash the engine
+    const safeMsgs = apiMsgs.filter(m => m && typeof m.role === "string" && m.content != null).map(m => ({
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : String(m.content),
+    }));
 
     // Timeout wrapper
     const withTimeout = (promise) => {
@@ -1331,7 +1387,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         let stream;
         try {
           stream = await engine.chat.completions.create({
-            messages: apiMsgs,
+            messages: safeMsgs,
             temperature: 0.7,
             max_tokens: maxTokens,
             stream: true,
@@ -1371,7 +1427,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         return { content, usage };
       } else {
         const resp = await engine.chat.completions.create({
-          messages: apiMsgs,
+          messages: safeMsgs,
           temperature: 0.7,
           max_tokens: maxTokens,
         });
@@ -1444,7 +1500,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
       userContent = (txt || "Here are my attached files:") + attachBlock;
     }
-    const userMsg = { role: "user", content: userContent };
+    const userMsg = { role: "user", content: userContent, _id: nextMsgId() };
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
@@ -1473,11 +1529,15 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
 
       abortRef.current = new AbortController();
-      const MAX_MSGS = 20; // Reduced from 30 to lower memory pressure on weak hardware
+      // Adaptive message limit: smaller context for small models to prevent GPU OOM
+      const modelDefSend = LOCAL_MODELS.find(m => m.id === localModelId);
+      const isSmallModelSend = modelDefSend && modelDefSend.contextWindow <= 32768;
+      const MAX_MSGS = isSmallModelSend ? 8 : 16;
 
-      // ─── STEP 1: Planning — skip for document queries & simple queries ───
+      // ─── STEP 1: Planning — skip for document queries, simple queries, AND small models ───
+      // On small models (Qwen 0.5B), planning wastes a full LLM call that causes noticeable lag
       let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery) {
+      if (!hasDocuments && !isSimpleQuery && !isSmallModelSend) {
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -1573,12 +1633,12 @@ Rules:
 
       // Stream the main response for real-time display
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
-      const isSmallModel = modelDef && modelDef.contextWindow <= 32768;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor(modelDef.contextWindow * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      const modelDef = modelDefSend;
+      const isSmallModel = isSmallModelSend;
+      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor((modelDef?.contextWindow || 32768) * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
 
-      // Throttled streaming — batches UI updates to prevent lag on weak hardware
-      const streamThrottle = createStreamThrottle(setStreamingText, 120);
+      // Throttled streaming — batches UI updates to prevent lag on weak hardware (Acer Aspire 5)
+      const streamThrottle = createStreamThrottle(setStreamingText, 180);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -1603,7 +1663,9 @@ Rules:
       const originalMemoryMatch = mainRaw.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
       const originalMemoryBlock = originalMemoryMatch ? originalMemoryMatch[0] : null;
 
-      const REFLECTION_PASSES = hasDocuments ? 2 : 1;
+      // Adaptive reflection: small models get 1 pass always (saves GPU time + memory)
+      // Larger models: 2 passes for document queries (accuracy matters), 1 for simple
+      const REFLECTION_PASSES = isSmallModelSend ? 1 : (hasDocuments ? 2 : 1);
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <expression> and <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
@@ -1644,8 +1706,8 @@ Rules:
         ];
 
         try {
-          // Show streaming during reflection so user sees progress
-          const reflectThrottle = createStreamThrottle(setStreamingText, 150);
+          // Show streaming during reflection — wider throttle to reduce lag on weak hardware
+          const reflectThrottle = createStreamThrottle(setStreamingText, 250);
           const { data: reflectData } = await callAI(reflectionMsgs, {
             maxTokens: reflectionMaxTokens,
             timeoutMs: 120000,
@@ -1673,9 +1735,10 @@ Rules:
         }
       }
 
-      // ─── STEP 5: Verification — only for complex document queries ───
+      // ─── STEP 5: Verification — only for complex document queries on larger models ───
+      // Skip on small models (Qwen 0.5B) — the extra LLM call is too slow and OOM-prone
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModelSend) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -1724,10 +1787,10 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
         setMemDraft(actions.memoryUpdate);
         saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
         if (text) {
-          currentMsgs = [...currentMsgs, { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*` }];
+          currentMsgs = [...currentMsgs, { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*`, _id: nextMsgId() }];
         }
       } else if (text) {
-        currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
+        currentMsgs = [...currentMsgs, { role: "assistant", content: text, _id: nextMsgId() }];
         const autoMemory = mem.trim()
           ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
           : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
@@ -1747,7 +1810,7 @@ CRITICAL: Preserve ALL tags (<expression>, <memory_update>) exactly.`;
           try {
             const { text: partialText, actions: partialActions } = parseResponse(checkpointRaw);
             if (partialText) {
-              currentMsgs = [...currentMsgs, { role: "assistant", content: partialText + `\n\n---\n*⚠ Partial response — review pipeline was interrupted: ${e.message}*` }];
+              currentMsgs = [...currentMsgs, { role: "assistant", content: partialText + `\n\n---\n*⚠ Partial response — review pipeline was interrupted: ${e.message}*`, _id: nextMsgId() }];
               setMsgs([...currentMsgs]);
               saveChat(currentMsgs);
               if (partialActions.expression) setExpression(partialActions.expression);
@@ -1952,13 +2015,27 @@ ${chatHtml}
           )}
 
           {/* ─── Uploaded SMSF Documents ─── */}
-          {pdfDocs.length > 0 && (
+          {(pdfDocs.length > 0 || pdfLoading.length > 0) && (
             <div style={{ borderTop: "1px solid var(--bd)", flexShrink: 0, padding: "8px 10px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
                 <span style={{ fontSize: "11px" }}>{"\uD83D\uDCDA"}</span>
                 <span style={{ fontWeight: 700, fontSize: "11px" }}>SMSF Documents</span>
-                <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded</span>
+                <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded{pdfLoading.length > 0 ? `, ${pdfLoading.length} extracting` : ""}</span>
               </div>
+              {/* Show PDFs currently being extracted — so user sees them immediately */}
+              {pdfLoading.map((pl, i) => (
+                <div key={"loading-" + i} style={{
+                  display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
+                  borderRadius: "5px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.15)",
+                  marginBottom: "4px",
+                }}>
+                  <span style={{ fontSize: "10px", animation: "pulse 1.5s infinite" }}>{"📄"}</span>
+                  <span style={{ fontSize: "10px", color: "#cc9955", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)" }}>{pl.name}</span>
+                  <span style={{ fontSize: "8px", color: "#cc9955", fontFamily: "var(--m)", animation: "pulse 1.5s infinite" }}>
+                    {pl.total > 0 ? `${pl.progress}/${pl.total} pages` : "reading..."}
+                  </span>
+                </div>
+              ))}
               {pdfDocs.map((doc, i) => (
                 <div key={i} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
@@ -2199,28 +2276,22 @@ ${chatHtml}
               </div>
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {msgs.map((m, i) => {
-                return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row", contain: "layout style" }}>
-                    {m.role === "assistant" && (
-                      <img
-                        src="./Expressions/Happy.png"
-                        alt=""
-                        style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }}
-                        onError={(e) => { e.target.style.display = "none"; }}
-                      />
-                    )}
-                    <div style={{ background: m.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
-                      {m.role === "assistant" ? <MemoMd text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
-                      {m.role === "assistant" && (
-                        <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
-                          <button onClick={() => { try { navigator.clipboard.writeText(m.content); } catch {} }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.15)", color: "var(--dm)", cursor: "pointer", fontSize: "9px", padding: "2px 6px", borderRadius: "3px", fontFamily: "var(--m)" }}>Copy</button>
-                        </div>
-                      )}
+              {/* Message windowing: only render recent messages in DOM to reduce layout work on weak hardware */}
+              {/* Older messages are preserved in state (for saving) but not rendered */}
+              {(() => {
+                const WINDOW_SIZE = 40;
+                const windowed = msgs.length > WINDOW_SIZE ? msgs.slice(-WINDOW_SIZE) : msgs;
+                const skipped = msgs.length - windowed.length;
+                return <>
+                  {skipped > 0 && (
+                    <div style={{ textAlign: "center", padding: "6px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", cursor: "pointer", borderRadius: "6px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)" }}
+                      onClick={() => {}}>
+                      {skipped} older message{skipped > 1 ? "s" : ""} hidden to save memory
                     </div>
-                  </div>
-                );
-              })}
+                  )}
+                  {windowed.map((m) => <ChatMessage key={m._id || m.content?.slice(0, 20)} msg={m} />)}
+                </>;
+              })()}
               {/* Streaming response display — shows text as it generates */}
               {streamingText && busy && (
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
