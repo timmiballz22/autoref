@@ -1162,6 +1162,38 @@ function Auto() {
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [exportedArtifacts, setExportedArtifacts] = useState([]); // [{id, name, blobUrl, size, timestamp}]
 
+  const createPdfEditArtifact = useCallback((docName, text, pageCount) => {
+    const safeName = (docName || "document.pdf").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${safeName} — Editable Text Artifact</title>
+<style>
+body{font-family:ui-monospace,Menlo,Consolas,monospace;background:#0e0e14;color:#e8e8ef;margin:0;padding:18px}
+.hdr{margin-bottom:12px;padding:10px 12px;border:1px solid #2b2b39;border-radius:8px;background:#141420}
+textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;border-radius:8px;background:#0b0b12;color:#e8e8ef;padding:12px;line-height:1.5}
+</style></head>
+<body>
+<div class="hdr"><strong>${safeName}</strong><br/>${Number(pageCount) || 0} pages · editable extracted text artifact</div>
+<textarea>${String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</textarea>
+</body></html>`;
+    const blob = new Blob([html], { type: "text/html" });
+    const blobUrl = URL.createObjectURL(blob);
+    setExportedArtifacts(prev => {
+      const filtered = prev.filter(a => !(a.kind === "pdf-edit-artifact" && a.sourceDoc === docName));
+      return [...filtered, {
+        id: "pdf-artifact-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+        name: docName.replace(/\.pdf$/i, "") + "-editable-artifact.html",
+        type: "text/html",
+        blobUrl,
+        size: blob.size,
+        timestamp: new Date(),
+        kind: "pdf-edit-artifact",
+        sourceDoc: docName,
+      }];
+    });
+  }, []);
+
   // Load on mount — always target the lightest default model first
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
@@ -1571,6 +1603,8 @@ function Auto() {
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
             const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
             setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Register editable text artifact version of the PDF extraction
+            createPdfEditArtifact(file.name, text, pageCount);
             // Store coordinate-tagged blocks for cross-reference detection
             const structuredBlocks = analyzeDocStructure(blocks || []);
             setCoordData(prev => ({ ...prev, [file.name]: { blocks: structuredBlocks } }));
@@ -1608,7 +1642,7 @@ function Auto() {
     });
     if (attachInputRef.current) attachInputRef.current.value = "";
     setAttachMenuOpen(false);
-  }, []); // No stale dependency on attachments — all checks use functional updates
+  }, [createPdfEditArtifact]); // No stale dependency on attachments — all checks use functional updates
 
   const removeAttachment = useCallback((index) => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
@@ -1835,10 +1869,30 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
   }, []);
 
+  const AUTO_RECOVERY_NOTE_RE = /\n?\[Auto-recovery note:[^\]]+\]\s*$/i;
+  const STREAM_CUT_NOTE_RE = /\n?\[Response was cut short due to an error[^\]]*\]\s*$/i;
+
+  function stripRecoveryNotes(text) {
+    return String(text || "").replace(AUTO_RECOVERY_NOTE_RE, "").replace(STREAM_CUT_NOTE_RE, "").trim();
+  }
+
+  function looksIncomplete(text) {
+    const t = stripRecoveryNotes(text);
+    if (!t) return true;
+    if (/[,\-:;]$/.test(t)) return true;
+    if (/\b(and|or|but|because|therefore|however|which|that)\s*$/i.test(t)) return true;
+    return !/[.!?)]$/.test(t);
+  }
+
   // ─── Call AI (offline-only — local models only, no cloud) ───
-  // Options: { maxTokens, onChunk, timeoutMs }
+  // Options: { maxTokens, onChunk, timeoutMs, autoContinuePasses }
   const callAI = useCallback(async (apiMsgs, opts = {}) => {
-    const { maxTokens = 4096, onChunk = null, timeoutMs = 90000 } = opts;
+    const {
+      maxTokens = 4096,
+      onChunk = null,
+      timeoutMs = 90000,
+      autoContinuePasses = 3,
+    } = opts;
     // Validate engine is loaded and healthy
     if (!localEngineRef.current) {
       throw new Error("No model loaded. Please download and load a local model from the sidebar before sending messages.");
@@ -1973,6 +2027,44 @@ Even for simple greetings, update memory with at least the conversation timestam
       }
     };
 
+    const continueFromPartial = async (seedText) => {
+      let combined = stripRecoveryNotes(seedText || "");
+      if (!combined) {
+        const fallback = String(seedText || "");
+        return {
+          content: fallback,
+          usage: { prompt_tokens: 0, completion_tokens: estimateTokens(fallback) },
+        };
+      }
+      let finalUsage = { prompt_tokens: 0, completion_tokens: estimateTokens(combined) };
+      for (let pass = 1; pass <= autoContinuePasses; pass++) {
+        if (!looksIncomplete(combined)) break;
+        const carry = combined.slice(-12000);
+        const continuationMsgs = [
+          ...makeRetryMsgs(safeMsgs),
+          { role: "assistant", content: carry },
+          {
+            role: "user",
+            content: "Continue exactly from the last sentence with no repetition. Finish the answer completely and end cleanly.",
+          },
+        ];
+        const { content: nextPart, usage } = await doCall(localEngineRef.current, continuationMsgs, {
+          maxTokens: Math.max(896, Math.floor(maxTokens * 0.75)),
+          temperature: 0.45,
+          timeoutMs: Math.max(timeoutMs, 150000),
+        });
+        const cleanedNext = stripRecoveryNotes(nextPart || "");
+        if (!cleanedNext) break;
+        if (combined.includes(cleanedNext.slice(0, Math.min(120, cleanedNext.length)))) break;
+        combined += (/\s$/.test(combined) || /^[,.;:!?]/.test(cleanedNext) ? "" : "\n") + cleanedNext;
+        finalUsage = usage || finalUsage;
+      }
+      return {
+        content: combined,
+        usage: finalUsage,
+      };
+    };
+
     try {
       const invoke = onChunk ? doCall(localEngineRef.current) : withTimeout(doCall(localEngineRef.current), "LLM call");
       const { content, usage } = await invoke;
@@ -1998,16 +2090,31 @@ Even for simple greetings, update memory with at least the conversation timestam
                 "LLM call retry"
               );
           const { content, usage } = await retryInvoke;
+          const continued = await continueFromPartial(content);
           return {
             data: {
-              choices: [{ message: { content } }],
-              usage,
+              choices: [{ message: { content: continued.content } }],
+              usage: continued.usage || usage,
             },
             usedModel: localModelId,
           };
         } catch (retryErr) {
           console.warn("Timeout-safe retry failed:", retryErr);
           if (lastStreamedContent.length > 80) {
+            try {
+              const continued = await continueFromPartial(lastStreamedContent);
+              return {
+                data: {
+                  choices: [{
+                    message: {
+                      content: `${continued.content}\n\n[Auto-recovery note: answer was stitched across multiple low-memory passes on your device.]`,
+                    },
+                  }],
+                  usage: continued.usage || { prompt_tokens: 0, completion_tokens: estimateTokens(continued.content) },
+                },
+                usedModel: localModelId,
+              };
+            } catch {}
             return {
               data: {
                 choices: [{
@@ -2025,6 +2132,20 @@ Even for simple greetings, update memory with at least the conversation timestam
       if (e.name === "AbortError") throw e;
       if (e.message && /timed out|stalled/i.test(e.message)) {
         if (lastStreamedContent.length > 80) {
+          try {
+            const continued = await continueFromPartial(lastStreamedContent);
+            return {
+              data: {
+                choices: [{
+                  message: {
+                    content: `${continued.content}\n\n[Auto-recovery note: answer was stitched across multiple low-memory passes on your device.]`,
+                  },
+                }],
+                usage: continued.usage || { prompt_tokens: 0, completion_tokens: estimateTokens(continued.content) },
+              },
+              usedModel: localModelId,
+            };
+          } catch {}
           return {
             data: {
               choices: [{
@@ -2037,7 +2158,29 @@ Even for simple greetings, update memory with at least the conversation timestam
             usedModel: localModelId,
           };
         }
-        throw new Error("Local model error: generation exceeded local device limits. The app now auto-recovers with partial output when possible; if no partial appears, retry once or switch to a lighter model.");
+        // Hard fallback: explicit "continue from here" auto-attempt even when stream produced no usable partial.
+        try {
+          const continueFromHereMsgs = [
+            ...makeRetryMsgs(safeMsgs),
+            { role: "user", content: "continue from here. If there is no previous output, answer the original request directly and completely." },
+          ];
+          const { content, usage } = await doCall(localEngineRef.current, continueFromHereMsgs, {
+            maxTokens: Math.max(896, Math.floor(maxTokens * 0.7)),
+            temperature: 0.45,
+            timeoutMs: Math.max(timeoutMs, 180000),
+          });
+          const cleaned = stripRecoveryNotes(content);
+          if (cleaned.length > 40) {
+            return {
+              data: {
+                choices: [{ message: { content: `${cleaned}\n\n[Auto-recovery note: resumed automatically using \"continue from here\".]` } }],
+                usage: usage || { prompt_tokens: 0, completion_tokens: estimateTokens(cleaned) },
+              },
+              usedModel: localModelId,
+            };
+          }
+        } catch {}
+        throw new Error("Local model error: generation exceeded local device limits. Auto-continue from here was attempted but this device still could not complete the pass; retry once or switch to a lighter model.");
       }
       // Handle the specific "model not loaded" error — attempt reload
       if (e.message && e.message.includes("not loaded")) {
@@ -2664,6 +2807,11 @@ ${chatHtml}
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
                             setAttachments(prev => prev.filter(a => a.name !== docName));
                             setCoordData(prev => { const n = { ...prev }; delete n[docName]; return n; });
+                            setExportedArtifacts(prev => {
+                              const removed = prev.filter(a => a.kind === "pdf-edit-artifact" && a.sourceDoc === docName);
+                              removed.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+                              return prev.filter(a => !(a.kind === "pdf-edit-artifact" && a.sourceDoc === docName));
+                            });
                           }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
                         </div>
                         {isScanned && (
@@ -2677,18 +2825,18 @@ ${chatHtml}
                 </div>
               )}
 
-              {/* Exported Reports */}
+              {/* Exported Reports / Generated Artifacts */}
               {exportedArtifacts.length > 0 && (
                 <div>
-                  <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Exported Reports</div>
+                  <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Generated Artifacts</div>
                   {exportedArtifacts.map((a) => (
                     <div key={a.id} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(124,224,138,0.04)", border: "1px solid rgba(124,224,138,0.12)", marginBottom: "6px" }}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
-                        <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>📊</span>
+                        <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>{a.kind === "pdf-edit-artifact" ? "🧾" : "📊"}</span>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: "12px", color: "var(--ac)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.name}>{a.name}</div>
                           <div style={{ fontSize: "10px", color: "var(--dm)", marginTop: "2px" }}>
-                            {(a.size / 1024).toFixed(1)} KB · {a.timestamp.toLocaleString()}
+                            {(a.size / 1024).toFixed(1)} KB · {a.timestamp.toLocaleString()}{a.sourceDoc ? ` · from ${a.sourceDoc}` : ""}
                           </div>
                         </div>
                       </div>
