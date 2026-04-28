@@ -188,23 +188,22 @@ function estimateMessagesTokens(msgs) {
   return msgs.reduce((sum, m) => sum + estimateTokens(typeof m?.content === "string" ? m.content : String(m?.content || "")), 0);
 }
 
-const SMSF_XREF_STRICT_RULES = `
-### SMSF XRef Strict Rules (authoritative operating standard)
-- Evidence first: identify the exact tested item and the exact supporting item; never assert support without traceable evidence.
-- Page-pinpointing is mandatory: always cite exact pages for BOTH sides of a cross-reference.
-- Value-pinpointing is mandatory for numeric tests: include exact amount/percentage/date tested on each side.
-- Label grammar must be explicit and plain:
-  - Match: "A page X $Y agrees with B page Z $Y"
-  - Mismatch: "A page X $Y does not agree with B page Z $Q"
-  - Partial support: clearly state what is supported and what is not.
-  - No support: explicitly state no supporting evidence found.
-- Never use unexplained shorthand (e.g., XR/OK/REF) as the only conclusion.
-- Prioritise material balances, totals, subtotals, ownership identifiers, valuation figures, contributions, pensions, ECPI/tax, and compliance-critical fields.
-- Contradictions must be surfaced, not hidden.
-- Readability rules: use numerals for pages and currency values (e.g., "$29,840.00"), plain language ("agrees with"/"does not agree with"), and avoid symbol-only conclusions.
-- Do not rely on color or visual styling to carry meaning; meaning must be explicit in text.
-- If evidence is scanned/unreadable or missing, say so directly and request OCR/additional evidence.
-`;
+const SMSF_XREF_RULES_FILE = "SMSF_XRef_ModelRules.txt";
+let _smsfXrefRulesCache = null;
+async function loadSmsfXrefRulesText() {
+  if (_smsfXrefRulesCache) return _smsfXrefRulesCache;
+  try {
+    const resp = await fetch(`./${encodeURIComponent(SMSF_XREF_RULES_FILE)}`, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const txt = (await resp.text()) || "";
+    _smsfXrefRulesCache = txt.trim();
+    return _smsfXrefRulesCache;
+  } catch (e) {
+    console.warn(`Could not load ${SMSF_XREF_RULES_FILE}:`, e);
+    _smsfXrefRulesCache = "";
+    return "";
+  }
+}
 
 // ─── Get current model's context budget for documents ───
 // Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU)
@@ -1158,6 +1157,7 @@ function Auto() {
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
+  const [smsfXrefRulesText, setSmsfXrefRulesText] = useState("");
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [exportedArtifacts, setExportedArtifacts] = useState([]); // [{id, name, blobUrl, size, timestamp}]
@@ -1165,6 +1165,7 @@ function Auto() {
   // Load on mount — always target the lightest default model first
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
+    loadSmsfXrefRulesText().then(setSmsfXrefRulesText);
     loadChat().then(v => {
       if (v?.length) {
         // Validate loaded messages: each must have role + string content (prevents render crashes from corrupted data)
@@ -1682,6 +1683,14 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 ${SMSF_XREF_STRICT_RULES}
 `;
 
+    s += `\n\n<smsf_xref_rules source="${SMSF_XREF_RULES_FILE}" mode="strict">\n`;
+    if (smsfXrefRulesText && smsfXrefRulesText.trim()) {
+      s += `${smsfXrefRulesText.trim()}\n`;
+    } else {
+      s += `[RULES FILE NOT LOADED] Use only rules from ${SMSF_XREF_RULES_FILE}. If unavailable, tell the user rules file could not be loaded and avoid inventing substitute rules.\n`;
+    }
+    s += `</smsf_xref_rules>\n`;
+
     // Include uploaded PDF document content for cross-referencing
     // Smart chunked approach: fits maximum document content within model's context window
     // Uses query-relevant chunk selection for 1000+ page documents
@@ -1772,7 +1781,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
 
     return s;
-  }, [mem, pdfDocs, localModelId, crossRefs]);
+  }, [mem, pdfDocs, localModelId, crossRefs, smsfXrefRulesText]);
 
   // ─── Parse AI response (memory updates and terminal commands) ───
   const parseResponse = useCallback((text) => {
@@ -1872,9 +1881,12 @@ Even for simple greetings, update memory with at least the conversation timestam
         // Preserve head+tail context so instructions and latest facts survive.
         const head = raw.slice(0, Math.floor(cap * 0.62));
         const tail = raw.slice(-Math.floor(cap * 0.32));
+        const rulesAppendix = (isSystem && idx === 0)
+          ? `\n\n[STRICT RULE SOURCE: ${SMSF_XREF_RULES_FILE}]\n${(smsfXrefRulesText || "").slice(0, 9000)}`
+          : "";
         return {
           ...m,
-          content: `${head}\n\n[...content trimmed for timeout-safe retry...]\n\n${tail}${isSystem && idx === 0 ? `\n\n${SMSF_XREF_STRICT_RULES}` : ""}`,
+          content: `${head}\n\n[...content trimmed for timeout-safe retry...]\n\n${tail}${rulesAppendix}`,
         };
       });
     };
