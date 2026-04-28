@@ -1680,7 +1680,6 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 6. **Recommendations**: Actionable next steps based on findings
 7. **References**: Complete list of all document pages cited
 
-${SMSF_XREF_STRICT_RULES}
 `;
 
     s += `\n\n<smsf_xref_rules source="${SMSF_XREF_RULES_FILE}" mode="strict">\n`;
