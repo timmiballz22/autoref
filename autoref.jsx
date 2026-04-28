@@ -416,6 +416,226 @@ async function extractPdfContent(arrayBuffer, fileName, onProgress = null) {
   return { text: fullText.trim(), pageCount, pageImages };
 }
 
+// ─── PDF Extraction with Coordinates ───
+// Extends extractPdfContent to also capture per-block bounding boxes.
+// blocks: [{text,page,x,y,w,h,pageHeight,pageWidth,fontSize}]
+async function extractPdfWithCoords(arrayBuffer, fileName, onProgress = null) {
+  if (!window.pdfjsLib) throw new Error("PDF.js not loaded. Refresh the page.");
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pageCount = pdf.numPages;
+  let fullText = "";
+  const pageImages = [];
+  const allBlocks = [];
+  const BATCH_SIZE = 10;
+  const skipImages = pageCount > 200;
+
+  for (let i = 1; i <= pageCount; i++) {
+    const page = await pdf.getPage(i);
+    const vp1 = page.getViewport({ scale: 1.0 });
+    const pageHeight = vp1.height;
+    const pageWidth = vp1.width;
+    const textContent = await page.getTextContent();
+
+    const sortedItems = [...textContent.items].filter(it => it.str.trim()).sort((a, b) => {
+      const dy = b.transform[5] - a.transform[5];
+      if (Math.abs(dy) > 5) return dy;
+      return a.transform[4] - b.transform[4];
+    });
+
+    let lines = [];
+    let currentLine = [];
+    let lastY = null;
+    for (const item of sortedItems) {
+      const y = item.transform[5];
+      if (lastY !== null && Math.abs(lastY - y) > 5) { lines.push(currentLine); currentLine = []; }
+      currentLine.push(item);
+      lastY = y;
+    }
+    if (currentLine.length > 0) lines.push(currentLine);
+
+    // Build coordinate blocks
+    for (const line of lines) {
+      let lineText = "";
+      let lastX = null, lastWidth = 0;
+      let minX = Infinity, maxX = -Infinity, baselineY = 0, maxFS = 0;
+      for (const item of line) {
+        const x = item.transform[4];
+        const y = item.transform[5];
+        const fs = Math.abs(item.transform[3]) || Math.abs(item.transform[0]) || 12;
+        const iw = item.width || (item.str.length * fs * 0.55);
+        if (lastX !== null) {
+          const gap = x - (lastX + lastWidth);
+          if (gap > 15) lineText += "\t";
+          else if (gap > 3) lineText += " ";
+        }
+        lineText += item.str;
+        lastX = x; lastWidth = iw;
+        if (x < minX) minX = x;
+        if (x + iw > maxX) maxX = x + iw;
+        if (y > baselineY) baselineY = y;
+        if (fs > maxFS) maxFS = fs;
+      }
+      const trimmed = lineText.trim();
+      if (!trimmed) continue;
+      allBlocks.push({
+        text: trimmed, page: i,
+        x: minX === Infinity ? 0 : minX, y: baselineY,
+        w: maxX <= minX ? 60 : maxX - minX,
+        h: maxFS || 12, pageHeight, pageWidth, fontSize: maxFS || 12,
+      });
+    }
+
+    // Reconstruct text string (identical logic to extractPdfContent)
+    const pageText = lines.map(line => {
+      let t = "", lx = null, lw = 0;
+      for (const item of line) {
+        const x = item.transform[4];
+        if (lx !== null) { const g = x - (lx + lw); if (g > 15) t += "\t"; else if (g > 3) t += " "; }
+        t += item.str; lx = x; lw = item.width || (item.str.length * 5);
+      }
+      return t;
+    }).join("\n").trim();
+
+    fullText += `\n\n=== [Page ${i}] ===\n`;
+    if (pageText.length > 30) {
+      fullText += pageText;
+    } else if (!skipImages && pageImages.length < MAX_PAGE_IMAGES) {
+      fullText += "(Scanned/handwritten page — see attached page image)";
+      try {
+        const scale = 1.5;
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = vp.width; canvas.height = vp.height;
+        const ctx = canvas.getContext("2d");
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        pageImages.push({ page: i, dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
+        canvas.width = 0; canvas.height = 0;
+      } catch (e) { console.warn(`Page ${i} image render failed:`, e); fullText += "\n(Could not render page image)"; }
+    } else {
+      fullText += "(Scanned/handwritten page — text not extractable, image omitted to save memory)";
+    }
+
+    if (i % BATCH_SIZE === 0) { if (onProgress) onProgress(i, pageCount); await new Promise(r => setTimeout(r, 0)); }
+    page.cleanup();
+  }
+
+  return { text: fullText.trim(), pageCount, pageImages, blocks: allBlocks };
+}
+
+// ─── Analyze document structure from coordinate blocks ───
+// Tags each block with structural metadata (headings, clause numbers, amounts, dates, etc.)
+function analyzeDocStructure(blocks) {
+  return blocks.map(block => {
+    const t = block.text;
+    const clauseMatch = t.match(/^(?:(?:Clause|Section|Article|Part|Schedule|Annexure|Item|Rule|Reg(?:ulation)?)\s+)?(\d+(?:\.\d+){0,3})\s*[:\.\-\s]/i);
+    const clauseNum = clauseMatch ? clauseMatch[1] : null;
+    const isAllCaps = t === t.toUpperCase() && t.length > 3 && t.length < 80 && /[A-Z]/.test(t);
+    const isNumberedHeading = /^\d+\.?\s+[A-Z][a-z]/.test(t) || /^[A-Z][A-Z\s]{4,}$/.test(t);
+    const isHeading = isAllCaps || isNumberedHeading || block.fontSize >= 14;
+    const amounts = (t.match(/\$\s?[\d,]+(?:\.\d{1,2})?(?:\s?(?:million|billion|thousand|k|m|b))?/gi) || [])
+      .map(a => a.replace(/\s/g, "").toLowerCase());
+    const percentages = (t.match(/\b\d+(?:\.\d+)?%/g) || []);
+    const dates = (t.match(/\b\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\b|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b/gi) || []);
+    const refMentions = [];
+    const refPat = /(?:see|refer(?:ence)?|per|as per|pursuant to|under|in accordance with|(?:in|at|to)\s+(?:clause|section|article|schedule|part|rule))\s+(\d+(?:\.\d+)*)/gi;
+    let rm;
+    while ((rm = refPat.exec(t)) !== null) refMentions.push(rm[1]);
+    return { ...block, clauseNum, isHeading, amounts, percentages, dates, refMentions };
+  });
+}
+
+// ─── Build cross-reference index between multiple documents ───
+// Finds shared clause numbers, amounts, percentages, and explicit references.
+function buildCrossRefIndex(docsData) {
+  if (!docsData || docsData.length < 2) return [];
+  const MAX_REFS = 400;
+  const refs = [];
+  let refId = 0;
+  const coords = b => ({ x: b.x, y: b.y, w: b.w, h: b.h, pageHeight: b.pageHeight, pageWidth: b.pageWidth });
+
+  // Build lookup maps per document
+  const clauseMap = {}, amountMap = {}, pctMap = {};
+  for (const doc of docsData) {
+    clauseMap[doc.name] = new Map();
+    amountMap[doc.name] = new Map();
+    pctMap[doc.name] = new Map();
+    for (const b of doc.blocks) {
+      if (b.clauseNum) { if (!clauseMap[doc.name].has(b.clauseNum)) clauseMap[doc.name].set(b.clauseNum, []); clauseMap[doc.name].get(b.clauseNum).push(b); }
+      for (const a of (b.amounts || [])) { if (!amountMap[doc.name].has(a)) amountMap[doc.name].set(a, []); amountMap[doc.name].get(a).push(b); }
+      for (const p of (b.percentages || [])) { if (!pctMap[doc.name].has(p)) pctMap[doc.name].set(p, []); pctMap[doc.name].get(p).push(b); }
+    }
+  }
+
+  for (let i = 0; i < docsData.length; i++) {
+    for (let j = i + 1; j < docsData.length; j++) {
+      if (refs.length >= MAX_REFS) break;
+      const docA = docsData[i], docB = docsData[j];
+
+      // Explicit references in docA blocks pointing to clause numbers in docB
+      for (const bA of docA.blocks) {
+        if (refs.length >= MAX_REFS) break;
+        for (const cn of (bA.refMentions || [])) {
+          const inB = clauseMap[docB.name]?.get(cn);
+          if (inB?.length) refs.push({ id: `xr-${refId++}`, type: "clause", keyword: `§${cn}`, sourceDoc: docA.name, sourcePage: bA.page, sourceText: bA.text.slice(0, 150), sourceCoords: coords(bA), targetDoc: docB.name, targetPage: inB[0].page, targetText: inB[0].text.slice(0, 150), targetCoords: coords(inB[0]) });
+        }
+      }
+
+      // Shared clause numbers between the two docs
+      for (const [cn, inA] of clauseMap[docA.name]) {
+        if (refs.length >= MAX_REFS) break;
+        const inB = clauseMap[docB.name]?.get(cn);
+        if (inB?.length) refs.push({ id: `cl-${refId++}`, type: "clause", keyword: `§${cn}`, sourceDoc: docA.name, sourcePage: inA[0].page, sourceText: inA[0].text.slice(0, 150), sourceCoords: coords(inA[0]), targetDoc: docB.name, targetPage: inB[0].page, targetText: inB[0].text.slice(0, 150), targetCoords: coords(inB[0]) });
+      }
+
+      // Matching dollar amounts
+      for (const [amt, inA] of amountMap[docA.name]) {
+        if (refs.length >= MAX_REFS) break;
+        if (!amt || amt.replace(/[$,.\s]/g, "").length < 2) continue;
+        const inB = amountMap[docB.name]?.get(amt);
+        if (inB?.length) refs.push({ id: `am-${refId++}`, type: "amount", keyword: amt, sourceDoc: docA.name, sourcePage: inA[0].page, sourceText: inA[0].text.slice(0, 150), sourceCoords: coords(inA[0]), targetDoc: docB.name, targetPage: inB[0].page, targetText: inB[0].text.slice(0, 150), targetCoords: coords(inB[0]) });
+      }
+
+      // Matching percentages (investment allocations)
+      for (const [pct, inA] of pctMap[docA.name]) {
+        if (refs.length >= MAX_REFS) break;
+        const inB = pctMap[docB.name]?.get(pct);
+        if (inB?.length) refs.push({ id: `pc-${refId++}`, type: "percentage", keyword: pct, sourceDoc: docA.name, sourcePage: inA[0].page, sourceText: inA[0].text.slice(0, 150), sourceCoords: coords(inA[0]), targetDoc: docB.name, targetPage: inB[0].page, targetText: inB[0].text.slice(0, 150), targetCoords: coords(inB[0]) });
+      }
+    }
+  }
+
+  // Deduplicate by type|keyword|sourceDoc|sourcePage|targetDoc|targetPage
+  const seen = new Set();
+  return refs.filter(r => {
+    const k = `${r.type}|${r.keyword}|${r.sourceDoc}|${r.sourcePage}|${r.targetDoc}|${r.targetPage}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+// ─── Format cross-reference index for AI prompt injection ───
+function formatCrossRefsForAI(crossRefs) {
+  if (!crossRefs || crossRefs.length === 0) return "";
+  const byType = { clause: [], amount: [], percentage: [] };
+  for (const r of crossRefs.slice(0, 80)) { if (byType[r.type]) byType[r.type].push(r); }
+  let s = `\n\n<cross_reference_index>\nAuto-detected coordinate-mapped cross-references (${crossRefs.length} total):\n`;
+  if (byType.clause.length > 0) {
+    s += `\nCLAUSE/SECTION MATCHES (same clause found in multiple documents):\n`;
+    for (const r of byType.clause.slice(0, 25)) s += `  ${r.keyword}: [${r.sourceDoc}, p.${r.sourcePage}] ↔ [${r.targetDoc}, p.${r.targetPage}]\n    Src: "${r.sourceText.slice(0, 80)}"\n    Dst: "${r.targetText.slice(0, 80)}"\n`;
+  }
+  if (byType.amount.length > 0) {
+    s += `\nSHARED DOLLAR AMOUNTS:\n`;
+    for (const r of byType.amount.slice(0, 20)) s += `  ${r.keyword}: [${r.sourceDoc}, p.${r.sourcePage}] ↔ [${r.targetDoc}, p.${r.targetPage}]\n`;
+  }
+  if (byType.percentage.length > 0) {
+    s += `\nSHARED PERCENTAGES (likely investment allocations):\n`;
+    for (const r of byType.percentage.slice(0, 20)) s += `  ${r.keyword}: [${r.sourceDoc}, p.${r.sourcePage}] ↔ [${r.targetDoc}, p.${r.targetPage}]\n`;
+  }
+  s += `\nUse these coordinate-mapped cross-references to find and cite matching content. Always reference BOTH document locations when reporting a match.\n</cross_reference_index>`;
+  return s;
+}
+
 // ─── Web Search via DuckDuckGo Instant Answer API ───
 // Used by Reviewer agents to research topics on the web.
 async function searchWeb(query) {
@@ -603,18 +823,21 @@ const ChatMessage = React.memo(function ChatMessage({ msg }) {
   );
 });
 
-// ─── PDF Viewer Component ───
-function PdfViewer({ pdfData, blobUrl, onClose }) {
-  const [currentPage, setCurrentPage] = useState(1);
+// ─── PDF Viewer Component (with coordinate highlight overlay) ───
+// highlights: [{page,x,y,w,h,pageHeight,color?,label?}]  — PDF-space coordinates
+// initialPage: page number to jump to on open
+function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1 }) {
+  const [currentPage, setCurrentPage] = useState(initialPage || 1);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
   const canvasRef = useRef(null);
   const pdfDocRef = useRef(null);
   const [jumpPage, setJumpPage] = useState("");
+  const [canvasW, setCanvasW] = useState(0);
+  const [canvasH, setCanvasH] = useState(0);
 
   useEffect(() => {
     if (!window.pdfjsLib) return;
-    // Support both legacy ArrayBuffer (pdfData) and new Blob URL (blobUrl)
     const source = blobUrl || pdfData;
     if (!source) return;
     let cancelled = false;
@@ -622,7 +845,6 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
       try {
         let loadSource;
         if (blobUrl) {
-          // Fetch the Blob URL to get ArrayBuffer on-demand (lazy loading)
           const resp = await fetch(blobUrl);
           const buf = await resp.arrayBuffer();
           loadSource = { data: buf };
@@ -633,7 +855,7 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
         if (cancelled) return;
         pdfDocRef.current = pdf;
         setTotalPages(pdf.numPages);
-        setCurrentPage(1);
+        setCurrentPage(Math.min(Math.max(initialPage || 1, 1), pdf.numPages));
       } catch (e) {
         console.error("PDF load error:", e);
       }
@@ -656,6 +878,7 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
         const ctx = canvas.getContext("2d");
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         await page.render({ canvasContext: ctx, viewport }).promise;
+        if (!cancelled) { setCanvasW(canvas.width); setCanvasH(canvas.height); }
       } catch (e) {
         console.error("Page render error:", e);
       }
@@ -664,6 +887,8 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
   }, [currentPage, zoom, totalPages]);
 
   const goPage = (n) => { if (n >= 1 && n <= totalPages) setCurrentPage(n); };
+  const renderScale = zoom * 1.5;
+  const pageHighlights = highlights.filter(h => h.page === currentPage);
 
   return (
     <div style={{
@@ -682,6 +907,11 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
           <span style={{ fontSize: "11px", color: "#4e4e62", fontFamily: "monospace" }}>
             Page {currentPage} of {totalPages}
           </span>
+          {pageHighlights.length > 0 && (
+            <span style={{ fontSize: "9px", padding: "1px 6px", borderRadius: "3px", background: "rgba(124,224,138,0.12)", color: "#7ce08a", border: "1px solid rgba(124,224,138,0.25)", fontFamily: "monospace" }}>
+              {pageHighlights.length} highlight{pageHighlights.length !== 1 ? "s" : ""}
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
           <button onClick={() => goPage(currentPage - 1)} disabled={currentPage <= 1}
@@ -714,9 +944,149 @@ function PdfViewer({ pdfData, blobUrl, onClose }) {
           </button>
         </div>
       </div>
-      {/* Canvas area */}
+      {/* Canvas area with SVG highlight overlay */}
       <div style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", padding: "20px" }}>
-        <canvas ref={canvasRef} style={{ borderRadius: "4px", boxShadow: "0 4px 30px rgba(0,0,0,0.6)" }} />
+        <div style={{ position: "relative", display: "inline-block" }}>
+          <canvas ref={canvasRef} style={{ borderRadius: "4px", boxShadow: "0 4px 30px rgba(0,0,0,0.6)", display: "block" }} />
+          {pageHighlights.length > 0 && canvasW > 0 && (
+            <svg style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", borderRadius: "4px", overflow: "visible" }}
+              width={canvasW} height={canvasH}>
+              {pageHighlights.map((h, idx) => {
+                const ph = h.pageHeight || 800;
+                // Convert PDF user-space coords (bottom-up, y=baseline) to canvas coords (top-down)
+                const rx = h.x * renderScale;
+                const rh = Math.max(h.h * renderScale, 8);
+                const ry = (ph - h.y) * renderScale - rh;
+                const rw = Math.max(h.w * renderScale, 10);
+                const col = h.color || "rgba(124,224,138,0.35)";
+                const stroke = h.strokeColor || (h.color ? h.color.replace(/[\d.]+\)$/, "0.9)") : "rgba(124,224,138,0.9)");
+                return (
+                  <g key={idx}>
+                    <rect x={rx} y={ry} width={rw} height={rh} fill={col} stroke={stroke} strokeWidth="1.5" rx="2" />
+                    {h.label && <text x={rx + 3} y={ry - 3} fontSize="9" fill={stroke} fontFamily="monospace" fontWeight="bold">{h.label}</text>}
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Cross-Reference Panel ───
+// Visual side panel showing auto-detected cross-references between documents.
+// Each entry is clickable to jump directly to that location in the PDF viewer.
+function CrossRefPanel({ crossRefs, onClose, onNavigate }) {
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  const TYPE_COLORS = { clause: "#7ce08a", amount: "#88bbcc", percentage: "#cc9955" };
+  const TYPE_LABELS = { clause: "Clauses", amount: "Amounts", percentage: "%" };
+
+  const filtered = crossRefs.filter(r => {
+    if (filter !== "all" && r.type !== filter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return r.keyword.toLowerCase().includes(q) || r.sourceDoc.toLowerCase().includes(q) ||
+        r.targetDoc.toLowerCase().includes(q) || r.sourceText.toLowerCase().includes(q);
+    }
+    return true;
+  });
+
+  const counts = { all: crossRefs.length };
+  for (const t of ["clause", "amount", "percentage"]) counts[t] = crossRefs.filter(r => r.type === t).length;
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 5000, background: "rgba(0,0,0,0.55)", display: "flex", justifyContent: "flex-end", animation: "fadeIn .15s ease" }}>
+      <div style={{ width: "min(500px,96vw)", height: "100%", background: "#0d0d14", borderLeft: "1px solid #181824", display: "flex", flexDirection: "column", animation: "slideL .2s ease" }}>
+
+        {/* Header */}
+        <div style={{ padding: "12px 16px", borderBottom: "1px solid #181824", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "16px" }}>🔗</span>
+            <span style={{ fontWeight: 700, fontSize: "14px", color: "#88bbcc" }}>Cross-References</span>
+            <span style={{ fontSize: "10px", color: "#4e4e62", fontFamily: "monospace", padding: "1px 6px", borderRadius: "3px", background: "rgba(255,255,255,0.03)", border: "1px solid #181824" }}>
+              {crossRefs.length} detected
+            </span>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#4e4e62", cursor: "pointer", fontSize: "22px", lineHeight: 1, padding: "0 4px" }}>×</button>
+        </div>
+
+        {/* Description */}
+        <div style={{ padding: "8px 14px", borderBottom: "1px solid #181824", fontSize: "10px", color: "#4e4e62", lineHeight: 1.6, flexShrink: 0 }}>
+          Auto-detected shared clauses, dollar amounts, and percentages across your uploaded documents. Click any entry to jump to it in the PDF viewer with visual highlights.
+        </div>
+
+        {/* Filter + Search */}
+        <div style={{ padding: "8px 12px", borderBottom: "1px solid #181824", display: "flex", gap: "5px", flexWrap: "wrap", alignItems: "center", flexShrink: 0 }}>
+          {["all", "clause", "amount", "percentage"].map(t => (
+            <button key={t} onClick={() => setFilter(t)} style={{
+              padding: "3px 10px", fontSize: "9px", borderRadius: "10px", cursor: "pointer",
+              border: `1px solid ${filter === t ? (TYPE_COLORS[t] || "#7ce08a") : "#1d1d28"}`,
+              background: filter === t ? `${TYPE_COLORS[t] || "#7ce08a"}18` : "transparent",
+              color: filter === t ? (TYPE_COLORS[t] || "#7ce08a") : "#4e4e62",
+              fontFamily: "monospace", fontWeight: filter === t ? 700 : 400,
+            }}>
+              {t === "all" ? `All (${counts.all})` : `${TYPE_LABELS[t]} (${counts[t]})`}
+            </button>
+          ))}
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
+            style={{ flex: 1, minWidth: "80px", padding: "3px 8px", fontSize: "11px", borderRadius: "4px", border: "1px solid #1d1d28", background: "rgba(255,255,255,0.02)", color: "#ccc", outline: "none", fontFamily: "monospace" }}
+          />
+        </div>
+
+        {/* List */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px" }}>
+          {filtered.length === 0 && (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#4e4e62", fontSize: "12px", lineHeight: 1.8 }}>
+              <div style={{ fontSize: "32px", marginBottom: "12px", opacity: 0.3 }}>🔍</div>
+              {crossRefs.length === 0
+                ? "Upload 2 or more documents to auto-detect cross-references."
+                : "No matches for current filter or search."}
+            </div>
+          )}
+          {filtered.map(ref => {
+            const col = TYPE_COLORS[ref.type] || "#7ce08a";
+            return (
+              <div key={ref.id}
+                style={{ padding: "10px 12px", borderRadius: "8px", border: "1px solid #181824", background: "rgba(255,255,255,0.012)", marginBottom: "6px", cursor: "pointer" }}
+                onMouseEnter={e => { e.currentTarget.style.background = `${col}0d`; e.currentTarget.style.borderColor = `${col}44`; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.012)"; e.currentTarget.style.borderColor = "#181824"; }}
+                onClick={() => onNavigate(ref)}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "7px" }}>
+                  <span style={{ padding: "1px 7px", fontSize: "8px", borderRadius: "3px", background: `${col}18`, color: col, border: `1px solid ${col}44`, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.4px" }}>
+                    {ref.type.toUpperCase()}
+                  </span>
+                  <span style={{ fontWeight: 700, fontSize: "13px", color: "#dde", fontFamily: "monospace" }}>{ref.keyword}</span>
+                  <span style={{ fontSize: "9px", color: "#4e4e62", marginLeft: "auto", fontFamily: "monospace" }}>click to view →</span>
+                </div>
+                <div style={{ display: "flex", gap: "6px", marginBottom: "4px" }}>
+                  <span style={{ fontSize: "8px", color: "#7ce08a", fontFamily: "monospace", flexShrink: 0, paddingTop: "2px", fontWeight: 700, minWidth: "24px" }}>SRC</span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: "10px", color: "#7ce08a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace" }}>{ref.sourceDoc} · p.{ref.sourcePage}</div>
+                    <div style={{ fontSize: "10px", color: "#484860", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "1px" }}>{ref.sourceText}</div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <span style={{ fontSize: "8px", color: "#88bbcc", fontFamily: "monospace", flexShrink: 0, paddingTop: "2px", fontWeight: 700, minWidth: "24px" }}>DST</span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: "10px", color: "#88bbcc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace" }}>{ref.targetDoc} · p.{ref.targetPage}</div>
+                    <div style={{ fontSize: "10px", color: "#484860", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "1px" }}>{ref.targetText}</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "8px 14px", borderTop: "1px solid #181824", fontSize: "9px", color: "#4e4e62", fontFamily: "monospace", flexShrink: 0, lineHeight: 1.5 }}>
+          {filtered.length} of {crossRefs.length} shown · Click any entry to open PDF with highlights
+        </div>
       </div>
     </div>
   );
@@ -757,8 +1127,13 @@ function Auto() {
   const [pdfLoading, setPdfLoading] = useState([]); // [{name, progress, total}] — PDFs being extracted
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
   const [pdfViewerIdx, setPdfViewerIdx] = useState(0); // which pdf to view
+  const [pdfViewerHighlights, setPdfViewerHighlights] = useState([]); // coordinate highlights for PDF viewer
+  const [pdfViewerInitPage, setPdfViewerInitPage] = useState(1); // page to jump to on open
   const [docTextViewerOpen, setDocTextViewerOpen] = useState(false); // full extracted text viewer
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
+  const [coordData, setCoordData] = useState({}); // docName -> {blocks: [structuredBlock]}
+  const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
+  const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
   const [artifactsOpen, setArtifactsOpen] = useState(false);
@@ -846,6 +1221,16 @@ function Auto() {
       exportedArtifacts.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
     };
   }, [exportedArtifacts]);
+
+  // Auto-rebuild cross-reference index whenever documents change
+  // Requires at least 2 docs; clears refs when fewer than 2 are loaded
+  useEffect(() => {
+    const docNames = Object.keys(coordData);
+    if (docNames.length < 2) { setCrossRefs([]); return; }
+    const docsData = docNames.map(name => ({ name, blocks: coordData[name].blocks }));
+    const refs = buildCrossRefIndex(docsData);
+    setCrossRefs(refs);
+  }, [coordData]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -1148,7 +1533,7 @@ function Auto() {
           try {
             const arrayBuffer = reader.result;
             setActivityStatus(`Extracting PDF: ${file.name}...`);
-            const { text, pageCount, pageImages } = await extractPdfContent(arrayBuffer, file.name, (current, total) => {
+            const { text, pageCount, pageImages, blocks } = await extractPdfWithCoords(arrayBuffer, file.name, (current, total) => {
               setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
               setPdfLoading(prev => prev.map(p => p.name === file.name ? { ...p, progress: current, total } : p));
             });
@@ -1162,6 +1547,9 @@ function Auto() {
             // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
             const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
             setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Store coordinate-tagged blocks for cross-reference detection
+            const structuredBlocks = analyzeDocStructure(blocks || []);
+            setCoordData(prev => ({ ...prev, [file.name]: { blocks: structuredBlocks } }));
             // Remove from loading tracker
             setPdfLoading(prev => prev.filter(p => p.name !== file.name));
           } catch (err) {
@@ -1315,6 +1703,9 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
         }
       }
       s += `</documents>`;
+      // Inject auto-detected cross-reference index (only for larger models — keeps Qwen prompt tight)
+      const isSmallModel = LOCAL_MODELS.find(m => m.id === localModelId)?.contextWindow <= 32768;
+      if (!isSmallModel && crossRefs.length > 0) s += formatCrossRefsForAI(crossRefs);
     }
 
     // Memory instructions
@@ -1355,7 +1746,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
 
     return s;
-  }, [mem, pdfDocs, localModelId]);
+  }, [mem, pdfDocs, localModelId, crossRefs]);
 
   // ─── Parse AI response (memory updates and terminal commands) ───
   const parseResponse = useCallback((text) => {
@@ -1917,6 +2308,24 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
   const clearChat = () => { setMsgs([]); saveChat([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
+  // ─── Navigate to a cross-reference: open PDF viewer, jump to page, show highlights ───
+  const handleNavigateCrossRef = useCallback((ref) => {
+    const srcIdx = pdfDocs.findIndex(d => d.name === ref.sourceDoc);
+    if (srcIdx < 0) return;
+    const highlights = [];
+    // Source location — green
+    highlights.push({ page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` });
+    // Target location (same doc only — shown on its own page, blue)
+    if (ref.targetDoc === ref.sourceDoc) {
+      highlights.push({ page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${ref.keyword}` });
+    }
+    setPdfViewerHighlights(highlights);
+    setPdfViewerInitPage(ref.sourcePage);
+    setPdfViewerIdx(srcIdx);
+    setPdfViewerOpen(true);
+    setCrossRefPanelOpen(false);
+  }, [pdfDocs]);
+
   // ─── Export chat analysis as PDF ───
   const exportAnalysisPdf = useCallback(() => {
     const assistantMsgs = msgs.filter(m => m.role === "assistant");
@@ -2020,12 +2429,22 @@ ${chatHtml}
 
   return (
     <div style={{ ...S, height: "100vh", display: "flex", fontFamily: "var(--f)", color: "var(--tx)", background: "var(--bg)", overflow: "hidden", fontSize: "13.5px" }}>
-      {/* PDF Viewer Modal */}
+      {/* Cross-Reference Panel */}
+      {crossRefPanelOpen && (
+        <CrossRefPanel
+          crossRefs={crossRefs}
+          onClose={() => setCrossRefPanelOpen(false)}
+          onNavigate={handleNavigateCrossRef}
+        />
+      )}
+      {/* PDF Viewer Modal (with coordinate highlights + page jump) */}
       {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
         <PdfViewer
           pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
           blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
-          onClose={() => setPdfViewerOpen(false)}
+          onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); }}
+          highlights={pdfViewerHighlights}
+          initialPage={pdfViewerInitPage}
         />
       )}
       {/* Full Document Text Viewer Modal — shows complete extracted text for cross-referencing */}
@@ -2120,14 +2539,16 @@ ${chatHtml}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
-                          <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
+                          <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
                           {doc.blobUrl && (
                             <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
                           )}
                           <button onClick={() => {
+                            const docName = doc.name;
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
-                            setAttachments(prev => prev.filter(a => a.name !== doc.name));
+                            setAttachments(prev => prev.filter(a => a.name !== docName));
+                            setCoordData(prev => { const n = { ...prev }; delete n[docName]; return n; });
                           }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
                         </div>
                         {isScanned && (
@@ -2241,12 +2662,20 @@ ${chatHtml}
                   marginBottom: "4px",
                 }}>
                   <span style={{ fontSize: "10px" }}>{"\uD83D\uDCC4"}</span>
-                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }}>{doc.name}</span>
+                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }}>{doc.name}</span>
                   <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount}pg</span>
                   <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
-                  <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                  <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
                 </div>
               ))}
+              {crossRefs.length > 0 && (
+                <button onClick={() => setCrossRefPanelOpen(true)}
+                  style={{ display: "flex", alignItems: "center", gap: "5px", width: "100%", padding: "5px 8px", marginTop: "4px", borderRadius: "5px", border: "1px solid rgba(124,224,138,0.2)", background: "rgba(124,224,138,0.05)", cursor: "pointer", textAlign: "left" }}>
+                  <span style={{ fontSize: "11px" }}>🔗</span>
+                  <span style={{ fontSize: "9px", color: "#7ce08a", fontFamily: "var(--m)", fontWeight: 600 }}>{crossRefs.length} cross-references detected</span>
+                  <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", marginLeft: "auto" }}>View →</span>
+                </button>
+              )}
               <div style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", marginTop: "4px", lineHeight: 1.4 }}>
                 Click name/PDF to view pages. Text to see full extracted content.<br/>
                 AI cross-references with page citations using expanded {(LOCAL_MODELS.find(m => m.id === localModelId)?.contextWindow || 32768).toLocaleString()} token context.
@@ -2447,6 +2876,19 @@ ${chatHtml}
                 <span style={{ fontSize: "9px", padding: "0px 4px", borderRadius: "3px", background: "rgba(136,187,204,0.15)", color: "var(--ac2)", fontWeight: 700 }}>{pdfDocs.length + exportedArtifacts.length}</span>
               )}
             </button>
+            {pdfDocs.length >= 2 && (
+              <button
+                onClick={() => setCrossRefPanelOpen(v => !v)}
+                style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "4px", color: crossRefPanelOpen ? "#7ce08a" : (crossRefs.length > 0 ? "var(--tx)" : "var(--dm)"), borderColor: crossRefPanelOpen ? "rgba(124,224,138,0.25)" : (crossRefs.length > 0 ? "rgba(255,255,255,0.1)" : undefined), background: crossRefPanelOpen ? "rgba(124,224,138,0.08)" : undefined }}
+                title={`View ${crossRefs.length} auto-detected cross-references between documents`}
+              >
+                <span style={{ fontSize: "12px" }}>🔗</span>
+                <span>X-Refs</span>
+                {crossRefs.length > 0 && (
+                  <span style={{ fontSize: "9px", padding: "0px 5px", borderRadius: "3px", background: "rgba(124,224,138,0.15)", color: "#7ce08a", fontWeight: 700 }}>{crossRefs.length}</span>
+                )}
+              </button>
+            )}
             <button
               onClick={exportAnalysisPdf}
               disabled={msgs.filter(m => m.role === "assistant").length === 0}
