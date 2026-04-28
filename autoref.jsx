@@ -183,6 +183,28 @@ function estimateTokens(text) {
   return Math.ceil(text.length / 3.2);
 }
 
+function estimateMessagesTokens(msgs) {
+  if (!Array.isArray(msgs)) return 0;
+  return msgs.reduce((sum, m) => sum + estimateTokens(typeof m?.content === "string" ? m.content : String(m?.content || "")), 0);
+}
+
+const SMSF_XREF_RULES_FILE = "SMSF_XRef_ModelRules.txt";
+let _smsfXrefRulesCache = null;
+async function loadSmsfXrefRulesText() {
+  if (_smsfXrefRulesCache) return _smsfXrefRulesCache;
+  try {
+    const resp = await fetch(`./${encodeURIComponent(SMSF_XREF_RULES_FILE)}`, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const txt = (await resp.text()) || "";
+    _smsfXrefRulesCache = txt.trim();
+    return _smsfXrefRulesCache;
+  } catch (e) {
+    console.warn(`Could not load ${SMSF_XREF_RULES_FILE}:`, e);
+    _smsfXrefRulesCache = "";
+    return "";
+  }
+}
+
 // ─── Get current model's context budget for documents ───
 // Conservative to prevent GPU OOM on weak hardware (Acer Aspire 5 / Intel iGPU)
 function getDocTokenBudget(modelId) {
@@ -1135,6 +1157,7 @@ function Auto() {
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
+  const [smsfXrefRulesText, setSmsfXrefRulesText] = useState("");
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [exportedArtifacts, setExportedArtifacts] = useState([]); // [{id, name, blobUrl, size, timestamp}]
@@ -1142,6 +1165,7 @@ function Auto() {
   // Load on mount — always target the lightest default model first
   useEffect(() => {
     loadVal(MEMORY_STORAGE_KEY).then(v => { setMem(v || ""); setMemDraft(v || ""); });
+    loadSmsfXrefRulesText().then(setSmsfXrefRulesText);
     loadChat().then(v => {
       if (v?.length) {
         // Validate loaded messages: each must have role + string content (prevents render crashes from corrupted data)
@@ -1656,6 +1680,14 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 6. **Recommendations**: Actionable next steps based on findings
 7. **References**: Complete list of all document pages cited`;
 
+    s += `\n\n<smsf_xref_rules source="${SMSF_XREF_RULES_FILE}" mode="strict">\n`;
+    if (smsfXrefRulesText && smsfXrefRulesText.trim()) {
+      s += `${smsfXrefRulesText.trim()}\n`;
+    } else {
+      s += `[RULES FILE NOT LOADED] Use only rules from ${SMSF_XREF_RULES_FILE}. If unavailable, tell the user rules file could not be loaded and avoid inventing substitute rules.\n`;
+    }
+    s += `</smsf_xref_rules>\n`;
+
     // Include uploaded PDF document content for cross-referencing
     // Smart chunked approach: fits maximum document content within model's context window
     // Uses query-relevant chunk selection for 1000+ page documents
@@ -1746,7 +1778,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
 
     return s;
-  }, [mem, pdfDocs, localModelId, crossRefs]);
+  }, [mem, pdfDocs, localModelId, crossRefs, smsfXrefRulesText]);
 
   // ─── Parse AI response (memory updates and terminal commands) ───
   const parseResponse = useCallback((text) => {
@@ -1836,15 +1868,39 @@ Even for simple greetings, update memory with at least the conversation timestam
       });
     };
 
-    const doCall = async (engine) => {
+    const makeRetryMsgs = (msgs) => {
+      // Keep structure but aggressively trim payload size for timeout-recovery retries.
+      return msgs.map((m, idx) => {
+        const raw = typeof m.content === "string" ? m.content : String(m.content || "");
+        const isSystem = m.role === "system";
+        const cap = isSystem ? 18000 : 9000;
+        if (raw.length <= cap) return m;
+        // Preserve head+tail context so instructions and latest facts survive.
+        const head = raw.slice(0, Math.floor(cap * 0.62));
+        const tail = raw.slice(-Math.floor(cap * 0.32));
+        const rulesAppendix = (isSystem && idx === 0)
+          ? `\n\n[STRICT RULE SOURCE: ${SMSF_XREF_RULES_FILE}]\n${(smsfXrefRulesText || "").slice(0, 9000)}`
+          : "";
+        return {
+          ...m,
+          content: `${head}\n\n[...content trimmed for timeout-safe retry...]\n\n${tail}${rulesAppendix}`,
+        };
+      });
+    };
+
+    const doCall = async (engine, msgsToSend = safeMsgs, limits = {}) => {
+      const cappedMaxTokens = Math.max(512, limits.maxTokens || maxTokens);
+      const temp = Number.isFinite(limits.temperature) ? limits.temperature : 0.7;
+      const dynamicTimeoutMs = limits.timeoutMs
+        || Math.max(timeoutMs, Math.min(360000, Math.floor(45000 + estimateMessagesTokens(msgsToSend) * 8)));
       // Use streaming if onChunk callback is provided
       if (onChunk) {
         let stream;
         try {
           stream = await engine.chat.completions.create({
-            messages: safeMsgs,
-            temperature: 0.7,
-            max_tokens: maxTokens,
+            messages: msgsToSend,
+            temperature: temp,
+            max_tokens: cappedMaxTokens,
             stream: true,
           });
         } catch (createErr) {
@@ -1859,7 +1915,7 @@ Even for simple greetings, update memory with at least the conversation timestam
         try {
           const iterator = stream[Symbol.asyncIterator]();
           // Idle timeout: only fail when generation stalls, not while healthy tokens are arriving.
-          const stallTimeoutMs = Math.max(15000, Math.min(120000, Math.floor(timeoutMs * 0.4)));
+          const stallTimeoutMs = Math.max(20000, Math.min(150000, Math.floor(dynamicTimeoutMs * 0.45)));
           while (true) {
             if (abortRef.current?.signal?.aborted) {
               await tryInterruptGeneration();
@@ -1898,9 +1954,9 @@ Even for simple greetings, update memory with at least the conversation timestam
       } else {
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const resp = await withTimeout(engine.chat.completions.create({
-          messages: safeMsgs,
-          temperature: 0.7,
-          max_tokens: maxTokens,
+          messages: msgsToSend,
+          temperature: temp,
+          max_tokens: cappedMaxTokens,
         }), "LLM call");
         const content = resp.choices?.[0]?.message?.content || "";
         return {
@@ -1920,6 +1976,28 @@ Even for simple greetings, update memory with at least the conversation timestam
         usedModel: localModelId,
       };
     } catch (e) {
+      const isTimeoutLike = !!(e?.message && /timed out|stalled/i.test(e.message));
+      if (!abortRef.current?.signal?.aborted && isTimeoutLike) {
+        // Automatic resilience retry: trim prompt footprint + reduce generation size.
+        try {
+          const retryMsgs = makeRetryMsgs(safeMsgs);
+          const retryMaxTokens = Math.max(768, Math.floor(maxTokens * 0.65));
+          const retryTimeoutMs = Math.max(timeoutMs, 150000);
+          const { content, usage } = await withTimeout(
+            doCall(localEngineRef.current, retryMsgs, { maxTokens: retryMaxTokens, temperature: 0.5, timeoutMs: retryTimeoutMs }),
+            "LLM call retry"
+          );
+          return {
+            data: {
+              choices: [{ message: { content } }],
+              usage,
+            },
+            usedModel: localModelId,
+          };
+        } catch (retryErr) {
+          console.warn("Timeout-safe retry failed:", retryErr);
+        }
+      }
       if (e.name === "AbortError") throw e;
       if (e.message && /timed out|stalled/i.test(e.message)) {
         throw new Error("Local model error: LLM call timed out — try a shorter query, fewer uploaded pages, or a simpler model.");
