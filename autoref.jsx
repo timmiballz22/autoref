@@ -1848,6 +1848,11 @@ Even for simple greetings, update memory with at least the conversation timestam
       role: m.role,
       content: typeof m.content === "string" ? m.content : String(m.content),
     }));
+    let lastStreamedContent = "";
+    const emitChunk = (text) => {
+      lastStreamedContent = text || "";
+      if (onChunk) onChunk(text);
+    };
 
     const tryInterruptGeneration = async () => {
       try {
@@ -1894,7 +1899,7 @@ Even for simple greetings, update memory with at least the conversation timestam
       const cappedMaxTokens = Math.max(512, limits.maxTokens || maxTokens);
       const temp = Number.isFinite(limits.temperature) ? limits.temperature : 0.7;
       const dynamicTimeoutMs = limits.timeoutMs
-        || Math.max(timeoutMs, Math.min(360000, Math.floor(45000 + estimateMessagesTokens(msgsToSend) * 8)));
+        || Math.max(timeoutMs, Math.min(900000, Math.floor(90000 + estimateMessagesTokens(msgsToSend) * 10)));
       // Use streaming if onChunk callback is provided
       if (onChunk) {
         let stream;
@@ -1917,7 +1922,7 @@ Even for simple greetings, update memory with at least the conversation timestam
         try {
           const iterator = stream[Symbol.asyncIterator]();
           // Idle timeout: only fail when generation stalls, not while healthy tokens are arriving.
-          const stallTimeoutMs = Math.max(20000, Math.min(150000, Math.floor(dynamicTimeoutMs * 0.45)));
+          const stallTimeoutMs = Math.max(45000, Math.min(600000, Math.floor(dynamicTimeoutMs * 0.65)));
           while (true) {
             if (abortRef.current?.signal?.aborted) {
               await tryInterruptGeneration();
@@ -1934,7 +1939,7 @@ Even for simple greetings, update memory with at least the conversation timestam
             const delta = chunk.choices?.[0]?.delta?.content || "";
             if (delta) {
               content += delta;
-              onChunk(content);
+              emitChunk(content);
             }
             if (chunk.usage) {
               usage = { prompt_tokens: chunk.usage.prompt_tokens || 0, completion_tokens: chunk.usage.completion_tokens || 0 };
@@ -1969,7 +1974,8 @@ Even for simple greetings, update memory with at least the conversation timestam
     };
 
     try {
-      const { content, usage } = await withTimeout(doCall(localEngineRef.current), "LLM call");
+      const invoke = onChunk ? doCall(localEngineRef.current) : withTimeout(doCall(localEngineRef.current), "LLM call");
+      const { content, usage } = await invoke;
       return {
         data: {
           choices: [{ message: { content } }],
@@ -1984,11 +1990,14 @@ Even for simple greetings, update memory with at least the conversation timestam
         try {
           const retryMsgs = makeRetryMsgs(safeMsgs);
           const retryMaxTokens = Math.max(768, Math.floor(maxTokens * 0.65));
-          const retryTimeoutMs = Math.max(timeoutMs, 150000);
-          const { content, usage } = await withTimeout(
-            doCall(localEngineRef.current, retryMsgs, { maxTokens: retryMaxTokens, temperature: 0.5, timeoutMs: retryTimeoutMs }),
-            "LLM call retry"
-          );
+          const retryTimeoutMs = Math.max(timeoutMs, 180000);
+          const retryInvoke = onChunk
+            ? doCall(localEngineRef.current, retryMsgs, { maxTokens: retryMaxTokens, temperature: 0.5, timeoutMs: retryTimeoutMs })
+            : withTimeout(
+                doCall(localEngineRef.current, retryMsgs, { maxTokens: retryMaxTokens, temperature: 0.5, timeoutMs: retryTimeoutMs }),
+                "LLM call retry"
+              );
+          const { content, usage } = await retryInvoke;
           return {
             data: {
               choices: [{ message: { content } }],
@@ -1998,11 +2007,37 @@ Even for simple greetings, update memory with at least the conversation timestam
           };
         } catch (retryErr) {
           console.warn("Timeout-safe retry failed:", retryErr);
+          if (lastStreamedContent.length > 80) {
+            return {
+              data: {
+                choices: [{
+                  message: {
+                    content: `${lastStreamedContent}\n\n[Auto-recovery note: generation timed out on this device, so this is a partial answer. Ask “continue from here” and it will resume.]`,
+                  },
+                }],
+                usage: { prompt_tokens: 0, completion_tokens: estimateTokens(lastStreamedContent) },
+              },
+              usedModel: localModelId,
+            };
+          }
         }
       }
       if (e.name === "AbortError") throw e;
       if (e.message && /timed out|stalled/i.test(e.message)) {
-        throw new Error("Local model error: LLM call timed out — try a shorter query, fewer uploaded pages, or a simpler model.");
+        if (lastStreamedContent.length > 80) {
+          return {
+            data: {
+              choices: [{
+                message: {
+                  content: `${lastStreamedContent}\n\n[Auto-recovery note: response is partial due to local device limits. Ask “continue from here” to keep going.]`,
+                },
+              }],
+              usage: { prompt_tokens: 0, completion_tokens: estimateTokens(lastStreamedContent) },
+            },
+            usedModel: localModelId,
+          };
+        }
+        throw new Error("Local model error: generation exceeded local device limits. The app now auto-recovers with partial output when possible; if no partial appears, retry once or switch to a lighter model.");
       }
       // Handle the specific "model not loaded" error — attempt reload
       if (e.message && e.message.includes("not loaded")) {
