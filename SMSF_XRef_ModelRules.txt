@@ -1,0 +1,2201 @@
+SMSF_XRef
+Formal standard + informal AI execution notes for SMSF audit PDF cross-referencing
+Compiled: 2026-04-27
+Status: Research and operating standard only. Not a PDF annotation task.
+
+================================================================================
+ABSOLUTE SCOPE CONTROL
+================================================================================
+
+This file separates two kinds of instructions.
+
+1. FORMAL STANDARD
+   Authority-backed rules from Australian law, AUASB standards, ATO/ASIC guidance,
+   the uploaded Australian Guide to Legal Citation, and Australian Government
+   readability/accessibility guidance.
+
+2. INFORMAL AI EXECUTION NOTES
+   Plain operational instructions for the AI model based on observed failure modes:
+   missing page/value references, clutter, overlap, filled boxes, bad labels, failure
+   to identify fund/FY, and failure to research before applying annotations.
+
+No visual annotation design is represented as law unless an official source actually
+requires it. Where a rule is an operational implication, it is labelled as such.
+
+================================================================================
+FORMAL STANDARD
+================================================================================
+
+F0. FINAL CONFIRMED POSITION
+
+No Australian legislation, ATO guidance, ASIC guidance, AUASB standard, or AGLC
+rule found mandates a specific visual PDF annotation style such as red arrows, red
+boxes, highlights, tickmarks, added margins, added pages, or internal codes like XR.
+
+The official requirements are about function, not decoration:
+- audit documentation must record procedures performed, evidence obtained and
+  conclusions reached;
+- audit documentation must be understandable to an experienced auditor with no
+  prior connection to the audit;
+- the specific items or matters tested must be identifiable;
+- SMSF auditors must obtain sufficient appropriate evidence;
+- SMSF audit work must address material balances, transactions, ownership,
+  separation, valuation, contributions, benefits, ECPI/tax and compliance matters;
+- citation/cross-reference practice must favour clarity, consistency and pinpointing.
+
+Therefore, the only defensible visual annotation system is one that makes the tested
+item clear without obscuring the source record.
+
+F1. AUTHORITY HIERARCHY
+
+Tier 1 - Binding Australian law
+- Superannuation Industry (Supervision) Act 1993 (Cth) (SISA).
+- Superannuation Industry (Supervision) Regulations 1994 (Cth) (SISR).
+- Other legislation only where directly relevant to the tested item, such as
+  contributions, tax, ECPI, superannuation guarantee, corporate trustees or
+  administrative reporting.
+
+Tier 2 - AUASB auditing and assurance standards
+- ASA 200, ASA 210, ASA 220, ASA 230, ASA 250, ASA 300, ASA 315, ASA 320,
+  ASA 330, ASA 450, ASA 500, ASA 505, ASA 520, ASA 530, ASA 540, ASA 550,
+  ASA 560, ASA 570, ASA 580, ASA 700, ASA 705, ASA 706.
+- ASAE 3000 and ASAE 3100 for compliance assurance context.
+- GS 009 Auditing Self-Managed Superannuation Funds.
+
+Tier 3 - Australian regulator guidance
+- ATO SMSF auditor guidance, including audit documentation, financial audit,
+  compliance audit, market value, ownership/separation, contribution evidence,
+  pension/ECPI, LRBA, wind-up, ACR and reporting guidance.
+- ASIC SMSF auditor registration, ongoing obligations and independence guidance.
+
+Tier 4 - AGLC citation/cross-reference guide
+- The uploaded Australian Guide to Legal Citation, Fourth Edition, 2018, is not
+  legislation. It is nevertheless relevant for Australian legal citation principles:
+  clarity, consistency, pinpoints, cross-references, numerals and currency format.
+
+Tier 5 - Australian Government readability/accessibility guidance
+- Australian Government Style Manual: plain language, numbers, currency,
+  mathematical relationships, tables and accessibility.
+- Australian Government design/accessibility guidance: do not rely on colour alone;
+  maintain readability and contrast.
+
+F2. MANDATED / OFFICIAL REQUIREMENTS
+
+F2.1 SISA accounting records and auditability
+SISA section 35AE requires SMSF accounting records to correctly record and explain
+transactions and financial position, and to be kept in a way that enables accounts,
+statements and returns to be conveniently and properly audited.
+
+Formal consequence:
+- Source records must remain readable.
+- An annotation must not cover or distort the accounting record.
+- Filled boxes over values are inconsistent with the purpose of auditability.
+
+F2.2 SISA accounts/statements/annual return/audit
+SISA sections 35B, 35C and 35D establish the accounts/statements, audit and annual
+return context for SMSFs.
+
+Formal consequence:
+- Values in financial statements, annual return labels, ledgers and schedules are
+  potential internal tested items.
+- External evidence must be traceable back to those values.
+
+F2.3 ASA 230 audit documentation
+ASA 230 requires audit documentation to show:
+- procedures performed;
+- relevant audit evidence obtained;
+- conclusions reached;
+- significant matters and judgments;
+- identifying characteristics of specific items or matters tested;
+- enough detail for an experienced auditor with no previous connection to the audit
+  to understand the work.
+
+Formal consequence:
+- A visible cross-reference must identify the specific tested value and location.
+- Labels like "OK", "Matched", "XR", "REF" or "See evidence" are inadequate if
+  they do not identify page, value and result.
+- Page + amount/value + result is the safest operational format.
+
+F2.4 ASA 500 audit evidence
+ASA 500 requires the auditor to design and perform procedures to obtain sufficient
+appropriate audit evidence, and to consider relevance and reliability of information
+used as evidence.
+
+Formal consequence:
+- A cross-reference must not imply support where evidence is partial, inconsistent,
+  absent or unreliable.
+- Contradictory evidence must be marked as such.
+- Absence of support must be stated, not hidden.
+
+F2.5 ATO SMSF financial audit guidance
+ATO guidance says SMSF auditors must gather appropriate evidence to support
+assertions for material account balances and transactions in signed financial
+statements, including market value and arm's-length matters.
+
+Formal consequence:
+- Cross-references should prioritise monetary values, account balances, totals,
+  subtotals and material transactions.
+- Non-value text is secondary unless it proves identity, ownership, FY, source
+  reliability or compliance status.
+
+F2.6 ATO documentation guidance
+ATO guidance says SMSF auditors must have sufficient documentation to support audit
+findings and opinions, including audit plan, evidence, procedures, checklists with
+notation, analysis, discussions/correspondence, audit testing/results and reasoning
+on significant matters.
+
+Formal consequence:
+- Cross-referencing must not be decorative.
+- It must show the evidence chain and conclusion.
+
+F2.7 ATO cross-checking guidance
+ATO guidance refers to cross-checking bank statement transactions, invoices and
+receipts to the trial balance, ledger accounts and financial statements; and checking
+source documents against financial statement accounts for classification.
+
+Formal consequence:
+- Page/value references must connect internal accounting values to external evidence
+  values.
+- The core label grammar is:
+  "A page [x] $[amount] agrees with B page [y] $[amount]"
+  or the corresponding mismatch/partial/no-support form.
+
+F2.8 ATO ownership/separation guidance
+ATO guidance requires sufficient appropriate evidence that the fund owns reported
+assets and that assets are kept separate from trustee/personal/employer assets.
+
+Formal consequence:
+- Asset values and ownership identifiers are high-priority cross-reference targets.
+- Fund name, trustee name, account name, title holder and FY may require
+  cross-referencing where they prove ownership/source reliability.
+
+F2.9 ATO market value guidance
+ATO guidance says SMSF assets must be reported at market value under SISR
+regulation 8.02B and that auditors must obtain sufficient appropriate evidence,
+using more than one source where required.
+
+Formal consequence:
+- Valuation numbers must be linked to valuation evidence by page and value.
+- If value support is absent or only indirect, label it as partial/no direct support.
+
+F2.10 AGLC clarity, consistency, pinpoints and cross-references
+AGLC states that clarity and consistency are cardinal principles. It defines pinpoint
+references as references to a specific page, paragraph, footnote or other section of
+a source. It also supports cross-references for clarity.
+
+Formal consequence:
+- Use specific page references.
+- Do not use unexplained shorthand.
+- Use precise, self-contained labels.
+- "A page 5 $29,840.00 agrees with B page 6 $29,840.00" is preferable to "XR-01".
+
+F2.11 AGLC and Style Manual numbers/currency
+AGLC says numerals should be used for pages, sections, paragraphs and citation
+elements, and currency should appear as numerals with a currency symbol or
+denominator. The Australian Government Style Manual says currency should use the
+symbol followed by numerals, no space, and 2 decimal places where decimals are used.
+
+Formal consequence:
+- Use "page 5", not "page five".
+- Use "$29,840.00", not "$29840", "$29.84k", or "twenty-nine thousand...".
+- Use exact value formatting consistent across both sides of the reference.
+
+F2.12 Style Manual plain language and mathematical relationships
+The Australian Government Style Manual says plain language helps users understand,
+and mathematical relationships should generally be described in words unless symbols
+are needed.
+
+Formal consequence:
+- Use "agrees with" and "does not agree with" for non-technical readers.
+- Avoid "=", "!=", "XR", "REF", "OK", "TBC" unless specifically requested and defined.
+
+F3. FORMAL LABEL GRAMMAR
+
+F3.1 Match
+A page 5 $29,840.00 agrees with B page 6 $29,840.00
+
+F3.2 Mismatch
+A page 5 $15,516.80 does not agree with B page 6 $15,077.45
+
+F3.3 Partial support
+A page 8 $150,000.00 is partly supported by B page 7 interest evidence only
+
+F3.4 No direct support
+A page 8 $150,000.00 has no direct support found in B
+
+F3.5 Multi-page support
+A page 7 $41,242.00 agrees with B pages 9-10 pension payments
+
+F3.6 Fund/FY identity confirmation
+Fund and FY: A page 1 agrees with B page 1
+Use this only if both documents visibly contain the same fund and FY information.
+
+F3.7 Fund/FY mismatch
+Fund/FY mismatch: A page 1 [fund/FY] does not agree with B page 1 [fund/FY]
+
+F3.8 Legal pinpoint note where needed
+SISR regulation 8.02B - market value support required for this asset value
+SISA section 35AE - accounting record must remain audit-readable
+
+F4. FORMAL VISUAL RULES
+
+Status: operational implications, not direct law, unless explicitly stated otherwise.
+
+F4.1 Permitted visible elements when user requests red annotation
+- Red text.
+- Red arrows.
+- Red underlines.
+- Red transparent highlights over exact values only.
+- Red outline boxes with no fill.
+- Red callout labels only where there is whitespace and no overlap.
+
+F4.2 Prohibited visible elements unless expressly requested
+- Filled boxes.
+- Opaque highlights.
+- Added margins.
+- Added pages.
+- Extra legends.
+- Internal codes such as XR.
+- Labels without page numbers.
+- Labels without values.
+- Labels that cover source records.
+- Text over source text.
+- Arrows that cross unrelated numbers.
+- Over-annotation of every number.
+
+F4.3 Box/highlight distinction
+- Underline: exact tested value.
+- Transparent highlight: exact number/value only.
+- No-fill box: exception, unsupported value, mismatch or high-risk value.
+- Arrow: points from label to exact value.
+- Label: states page + value + result in words.
+
+F4.4 No-fill rule
+All boxes must be outline-only. Fill opacity must be zero. If the tool cannot guarantee
+zero fill, do not use boxes; use underline + arrow + label only.
+
+F4.5 Text overflow rule
+A label is invalid if any text is cut off, clipped, covered, too small to read, or overlaps
+source content. Shorten the label or move it to safe whitespace.
+
+F4.6 Non-overlap rule
+A label is invalid if it touches, overlaps or visually competes with another label,
+original text, a source value, a table border, a signature, a date or a material note.
+
+F4.7 First-page fund/FY rule
+On the first page, identify the fund and FY only if the source page visibly provides it.
+If the fund/FY is material to source reliability, cross-reference it to the corresponding
+page in the other pack. Do not invent or infer fund/FY. If the first page lacks the FY,
+look for the FY elsewhere and cite that page. If no FY is found, state "FY not found"
+only if this is relevant to the review.
+
+F5. FORMAL PAGE ORGANISATION RULES
+
+F5.1 Page number definition
+Use PDF page number unless a different page-numbering convention is expressly requested.
+If printed and PDF numbers differ and the difference matters, use both:
+A PDF page 5 / printed page 3 $29,840.00 agrees with B PDF page 6 $29,840.00
+
+F5.2 Same relationship on both sides
+If A page 5 is linked to B page 6, annotate both pages where practical:
+- On A: A page 5 $29,840.00 agrees with B page 6 $29,840.00
+- On B: B page 6 $29,840.00 agrees with A page 5 $29,840.00
+
+F5.3 Do not add structure
+Do not add index pages, matrices, margins or cover pages unless expressly requested.
+
+F5.4 Do not invent workpaper format
+Do not force a generic design. Follow the source pages, the evidence chain and the
+user's explicit constraints. A proper SMSF cross-reference is evidence-led.
+
+F6. FORMAL PRIORITY ORDER FOR SMSF CROSS-REFERENCING
+
+Priority 1: Core money values
+- Bank balances.
+- Bank reconciliation totals.
+- Contributions.
+- Pension/benefit payments.
+- Investment balances.
+- Term deposits.
+- Managed fund/platform values.
+- Property values.
+- Rental income.
+- Loan/LRBA balances.
+- Tax payable/refundable.
+- ECPI-related percentages/amounts.
+- Variances/mismatches/unsupported amounts.
+
+Priority 2: Evidence reliability / ownership / period identifiers
+- Fund name.
+- FY/year ended.
+- ABN, TFN, ACN/SAN only if relevant.
+- Trustee/member names.
+- Bank account names and suffixes.
+- Statement dates.
+- Valuation dates.
+- Title holder/ownership documents.
+- Auditor/report dates.
+
+Priority 3: Contextual labels
+- Section headings.
+- Account names.
+- Report headings.
+- Notes that explain whether a value is gross/net, member-level/fund-level, rounded,
+  or total/subtotal.
+
+================================================================================
+INFORMAL AI EXECUTION NOTES
+================================================================================
+
+This section is for the AI model. It is deliberately direct. It converts the formal
+standard and prior failures into a checklist.
+
+I0. NON-NEGOTIABLE OBJECTIVE
+
+Make the PDF easier for an auditor or non-technical reviewer to follow.
+
+Every annotation must answer:
+- Which exact number?
+- On which page?
+- In which pack?
+- What is the matching / conflicting / missing evidence?
+- On which page?
+- What is the result?
+
+If the answer is not visible, the annotation fails.
+
+I1. DO NOT REPEAT THESE FAILURES
+
+1. Do not use XR.
+2. Do not use private codes.
+3. Do not use labels that say only "matched", "OK", "support", "ref", or "see evidence".
+4. Do not omit page numbers.
+5. Do not omit the dollar value.
+6. Do not focus on general text when the job is about values.
+7. Do not create filled boxes that cover the thing being referenced.
+8. Do not create text boxes that overflow.
+9. Do not create text that overlaps source text.
+10. Do not create arrows that point vaguely to a row or section when an exact value is available.
+11. Do not add margins unless asked.
+12. Do not add pages unless asked.
+13. Do not create a new invented style.
+14. Do not claim something is law unless it is law.
+15. Do not assume the fund name or FY; read them from the document.
+16. Do not assume a value is supported if only interest, partial transactions or adjacent evidence is present.
+17. Do not over-annotate so heavily that the page becomes harder to read.
+18. Do not use colours other than the user-requested colour.
+19. Do not use symbols like "!=" for elderly/non-technical readers.
+20. Do not skip the final visual QA render.
+
+I2. USER'S SPECIFIC INCORRECT AREAS CONVERTED INTO MODEL RULES
+
+Incorrect area: Referencing should be both pages AND numbers consistently and more if needed.
+Model rule:
+- Every visible label must include both page references and the exact amount/value.
+- Add dates/account names only when needed to disambiguate.
+
+Incorrect area: Focus mainly on the numbers/values of currency to reference and more if needed.
+Model rule:
+- Start with all dollar values, totals and subtotals.
+- Add identity/FY references only when they support the value or source reliability.
+
+Incorrect area: Overflowing text boxes.
+Model rule:
+- Text box is invalid if clipped.
+- Use shorter labels.
+- Use two-line labels only if they still fit.
+- If a label cannot fit, use underline/arrow and put detail in annotation comment metadata.
+
+Incorrect area: The referencing should always be for numbers and pages and more if needed.
+Model rule:
+- Page + value is mandatory.
+- "More if needed" means date, account name, member name, source type or legal pinpoint.
+
+Incorrect area: Text overlapping and more if needed.
+Model rule:
+- Use collision checking.
+- Labels must not overlap source text, other labels, arrows, values, signatures, dates or table content.
+
+Incorrect area: Didn't research how to label and more if needed.
+Model rule:
+- Use AGLC clarity/consistency/pinpoint principles.
+- Use Australian Government plain-language guidance.
+- Use words: "agrees with", "does not agree with", "partly supported by", "no direct support found".
+
+Incorrect area: Didn't research anything and more if needed.
+Model rule:
+- Before marking a PDF, check the formal standard.
+- Identify whether each rule is law, standard, regulator guidance, citation convention, readability guidance, or operational implication.
+
+Incorrect area: Boxes have fill which completely covered the thing and more if needed.
+Model rule:
+- Boxes must be outline-only.
+- Fill opacity must be zero.
+- If fill cannot be controlled, use underline and arrow only.
+
+Incorrect area: Speak about the fund and the FY in the first page, and research since it may need referencing elsewhere.
+Model rule:
+- Inspect page 1 of each pack for fund name, ABN/TFN if visible, FY/year ended, report type and source identity.
+- If fund/FY appear elsewhere instead, reference the actual page.
+- If the fund/FY differs between packs, mark the mismatch.
+- If fund/FY are absent and material, label "FY not found" only after checking relevant pages.
+
+Incorrect area: Box highlighting is wrong.
+Model rule:
+- Do not use box highlight as a filled rectangle.
+- Use red underline for exact values.
+- Use transparent highlight only on the exact number.
+- Use red no-fill outline only around mismatches or unsupported values.
+
+Incorrect area: Not actually in the cross referencing SMSF format. Fix that.
+Model rule:
+- SMSF format is evidence-led:
+  internal workpaper/account value -> external evidence value -> page/value -> result.
+- Prioritise bank, contributions, pensions, investments, TDs, property, loans/LRBA, tax/ECPI and ownership.
+
+Incorrect area: Too hard to understand for auditors.
+Model rule:
+- Use short, plain labels.
+- Avoid codes and symbols.
+- Do not make the auditor decode the file.
+- The label itself must tell the whole evidence relationship.
+
+Incorrect area: Make them not overlap each other.
+Model rule:
+- Run visual QA after annotation.
+- If labels overlap, reduce label count, shorten wording, move label, or use comments metadata.
+
+Incorrect area: DO DEEPER STANDARD RESEARCH.
+Model rule:
+- Use official Australian sources first: legislation, AUASB, ATO, ASIC, Style Manual.
+- Use AGLC for citation/pinpoint/clarity only.
+- Use non-government PDF annotation sources only for tool mechanics, not legal authority.
+
+I3. AI WORKFLOW BEFORE ANNOTATING
+
+Step 1 - Identify document metadata.
+- Pack name.
+- Fund name.
+- FY/year ended.
+- Date of report/statement.
+- Pages where this metadata appears.
+- Do not assume missing metadata.
+
+Step 2 - Build value inventory.
+For each relevant number:
+- Pack.
+- PDF page.
+- Amount/value exactly as displayed.
+- Nearby label/description.
+- Date/period if shown.
+- Entity/fund/account/member if shown.
+- Value type: bank, contribution, pension, investment, TD, property, tax, ECPI, loan, ownership, other.
+- Confidence.
+
+Step 3 - Match values.
+For each internal value, find external support:
+- Same amount?
+- Same date/period?
+- Same account/member/fund?
+- Same source type?
+- Gross or net basis?
+- Rounded or exact?
+- Material/high risk?
+
+Step 4 - Classify result.
+Use one:
+- agrees with
+- does not agree with
+- partly supported by
+- no direct support found
+- not enough information to conclude
+
+Step 5 - Create labels.
+Labels must include:
+- Pack A/B.
+- Page number.
+- Exact value.
+- Result phrase.
+- Evidence pack/page/value.
+
+Step 6 - Place visual marks.
+- Underline exact value.
+- Add transparent highlight over exact value only.
+- Use no-fill box only if needed.
+- Add short arrow to exact value.
+- Put label in whitespace.
+- Avoid overlap.
+
+Step 7 - QA.
+For every annotated page:
+- Source value still readable?
+- Label readable?
+- No overflow?
+- No overlap?
+- No fill covering evidence?
+- Arrow points to exact value?
+- Page + value present?
+- Result in words?
+- Fund/FY checked if relevant?
+- Page count unchanged unless user requested added pages?
+
+I4. AI LABEL EXAMPLES
+
+Good:
+- A page 5 $29,840.00 agrees with B page 6 $29,840.00
+- A page 5 $15,516.80 does not agree with B page 6 $15,077.45
+- A page 8 $150,000.00 is partly supported by B page 7 interest evidence only
+- A page 8 $150,000.00 has no direct support found in B
+- Fund/FY: A page 1 agrees with B page 1
+- Fund/FY mismatch: A page 1 FY2024 does not agree with B page 1 FY2023
+
+Bad:
+- XR-01
+- REF
+- OK
+- Matched
+- See evidence
+- A p5 != B p6
+- B p6 support
+- Supported
+- Confirmed
+
+I5. CLUTTER CONTROL
+
+Use the least annotation needed to make the evidence relationship clear.
+
+If a page has many values:
+1. Mark totals first.
+2. Mark mismatches second.
+3. Mark unsupported values third.
+4. Mark individual components only if they explain a total or exception.
+5. Do not mark every repeated number.
+
+If labels crowd the page:
+- Use shorter labels.
+- Move labels to nearby blank area.
+- Use metadata comments for detail.
+- Keep visible label page+value+result.
+- Do not use margins unless requested.
+
+I6. FORMATTING CONTROL
+
+Default label font:
+- Plain sans-serif.
+- Large enough to read at normal zoom.
+- Red only if user requested red.
+- No bold unless needed for visibility.
+- No all-caps except short source labels like A/B.
+
+Default line/box:
+- Thin red line.
+- Arrow head clear but not oversized.
+- Box no fill.
+- Highlight transparent and exact-number-only.
+
+I7. FUND AND FY CONTROL
+
+The first pass on any SMSF pack must answer:
+- What is the fund name?
+- What is the financial year / year ended?
+- What page proves it?
+- Does the external pack show the same fund/FY?
+- If not, where is the mismatch?
+- If not found, was it checked across the relevant pages?
+
+Do not annotate values until the fund/FY/source identity risk is understood.
+
+I8. FINAL ACCEPTANCE TEST
+
+The file passes only if:
+- Every visible value reference includes page + value.
+- Every result is written in words.
+- All source values are readable.
+- No boxes have fill.
+- No text overlaps.
+- No labels overflow.
+- No unexplained codes appear.
+- Fund/FY was checked and referenced where relevant.
+- The annotation follows SMSF evidence logic, not arbitrary design.
+- The output was visually re-rendered and inspected.
+
+================================================================================
+FORMAL LAW EXPANSION - ADDITIONAL AUSTRALIAN LEGISLATION
+================================================================================
+
+Status of this section:
+- This section adds further Australian legislative hooks without deleting anything
+  from the existing standard.
+- These provisions do not change the core annotation grammar.
+- They strengthen the checklist of what may need page/value cross-referencing in
+  an SMSF audit file.
+- Use these provisions only when the document contents make them relevant.
+- Do not assume a breach, compliance issue, fund status, contribution type, pension
+  status, related-party relationship, market value problem, LRBA, or corporate
+  trustee issue unless the documents support it.
+
+L0. CORE RULE AFTER ADDING MORE LAW
+
+The annotation rule remains unchanged:
+
+    [Pack] page [PDF page] [exact value] [plain-language result]
+    [other Pack] page [PDF page] [exact value/source]
+
+Examples:
+    A page 5 $29,840.00 agrees with B page 6 $29,840.00
+    A page 8 $150,000.00 has no direct support found in B
+    A page 5 $15,516.80 does not agree with B page 6 $15,077.45
+
+More law increases what may be relevant. It does not justify clutter, opaque boxes,
+unexplained shorthand, missing page numbers, or missing values.
+
+================================================================================
+L1. SUPERANNUATION INDUSTRY (SUPERVISION) ACT 1993 - ADDITIONAL HOOKS
+================================================================================
+
+L1.1 SISA section 17A - definition of self managed superannuation fund
+Use when:
+- The file contains trustee/member structure, corporate trustee/director details,
+  member count or SMSF status.
+Cross-reference consequence:
+- Fund/member/trustee identity may need page references where fund status is relevant.
+- Do not annotate identity fields unless they support source reliability, SMSF status,
+  ownership, trustee/member authority, or a value.
+
+L1.2 SISA section 17B - trustee/director remuneration carve-out
+Use when:
+- The file shows trustee or director remuneration or related-party service fees.
+Cross-reference consequence:
+- Reference the fee amount, page, service basis and any support for arm's-length terms.
+
+L1.3 SISA section 19 - regulated superannuation fund
+Use when:
+- Compliance status or regulated fund status is in issue.
+Cross-reference consequence:
+- Fund status documents should be page-referenced if they support the audit conclusion.
+
+L1.4 SISA section 42A - complying fund status for SMSFs
+Use when:
+- The annual return, audit report or compliance status is in issue.
+Cross-reference consequence:
+- Compliance status references should identify the document page and FY.
+
+L1.5 SISA section 52B - trustee covenants for SMSFs
+Use when:
+- Investment strategy, trustee duties, separation, care/diligence, performance review
+  or member interests are in issue.
+Cross-reference consequence:
+- Investment strategy page, trustee minutes, review date and related asset values may
+  require page references.
+
+L1.6 SISA section 52C - director covenants for corporate trustees of SMSFs
+Use when:
+- The SMSF has a corporate trustee and director obligations are relevant.
+Cross-reference consequence:
+- Corporate trustee/director pages may need references where authority or execution
+  supports transactions.
+
+L1.7 SISA section 55 - consequences of contravention of covenant
+Use when:
+- The audit file identifies potential covenant breaches.
+Cross-reference consequence:
+- Do not merely label "breach"; reference the exact value/page/event and the source
+  support for the conclusion.
+
+L1.8 SISA section 55A - cashing benefits after death
+Use when:
+- Death benefits, deceased members or death benefit instructions appear.
+Cross-reference consequence:
+- Reference member/deceased status, benefit value, payment page, and governing-rule
+  evidence.
+
+L1.9 SISA section 58 - trustee not to be subject to direction
+Use when:
+- Member directions, investment directions, external controller notes or related-party
+  instructions appear.
+Cross-reference consequence:
+- Reference the document page showing the direction and any related transaction value.
+
+L1.10 SISA section 59 - exercise of discretion by person other than trustee
+Use when:
+- Binding/non-binding death benefit nominations, pension discretion, member directions
+  or third-party control appears.
+Cross-reference consequence:
+- Reference the decision document page and relevant benefit/payment value.
+
+L1.11 SISA section 62 - sole purpose test
+Use when:
+- Private benefit, related-party use, collectable/personal-use asset, property use,
+  loan, early access or non-retirement benefit concern appears.
+Cross-reference consequence:
+- Reference the exact asset/payment/benefit value and the page showing the private
+  benefit risk.
+
+L1.12 SISA section 62A - collectables and personal use assets
+Use when:
+- Artwork, jewellery, coins, wine, vehicles, recreational assets or similar assets appear.
+Cross-reference consequence:
+- Reference asset value, insurance/storage/lease evidence, and any related-party use
+  evidence.
+
+L1.13 SISA section 65 - lending or financial assistance to members/relatives
+Use when:
+- Loans, advances, member reimbursements, payments to members, related-party debtor
+  accounts or financial assistance appear.
+Cross-reference consequence:
+- Reference the exact dollar amount, member/relative page, bank/payment evidence page
+  and classification.
+
+L1.14 SISA section 66 - acquisitions of assets from related parties
+Use when:
+- Asset purchases from members, relatives, employers, related companies/trusts appear.
+Cross-reference consequence:
+- Reference purchase price, asset type, vendor relationship, page support and exception
+  category if relevant.
+
+L1.15 SISA section 67 - borrowing by regulated superannuation funds
+Use when:
+- Loans, overdrafts, negative cash, borrowing notes or financing appears.
+Cross-reference consequence:
+- Reference borrowing amount, lender page, loan statement page and any exception/LRBA
+  support.
+
+L1.16 SISA section 67A - limited recourse borrowing arrangements
+Use when:
+- LRBA, bare trust, custodian trust, property loan, limited recourse loan, holding trust
+  or single acquirable asset appears.
+Cross-reference consequence:
+- Reference asset value, loan balance, holding-trust evidence, lender statement,
+  repayment/interest pages and ownership support.
+
+L1.17 SISA section 67B - LRBA replacement assets
+Use when:
+- Refinancing, substituted security, replacement asset or changed LRBA asset appears.
+Cross-reference consequence:
+- Reference the original and replacement asset pages and values.
+
+L1.18 SISA section 69 - relatives
+Use when:
+- Related-party/member-relative analysis appears.
+Cross-reference consequence:
+- Reference relationship evidence only if it affects a transaction, asset, loan or
+  compliance conclusion.
+
+L1.19 SISA Part 8 / sections 70B-70E - Part 8 associates
+Use when:
+- In-house asset, related trust/company, partnership, employer-sponsor or associate
+  analysis appears.
+Cross-reference consequence:
+- Reference the relationship page and the asset/loan/investment value.
+
+L1.20 SISA section 71 - in-house asset definition
+Use when:
+- Related-party loans, investments in related trusts/companies, leased assets, unpaid
+  present entitlements or related-party assets appear.
+Cross-reference consequence:
+- Reference the asset value, related party, ownership/lease evidence and threshold
+  calculation.
+
+L1.21 SISA sections 82-85 - in-house asset rules and anti-avoidance
+Use when:
+- In-house asset percentage, 5% threshold, rectification plan or scheme concern appears.
+Cross-reference consequence:
+- Reference the fund asset total, in-house asset value, calculation page and supporting
+  evidence.
+
+L1.22 SISA section 103 - minutes and records
+Use when:
+- Trustee minutes, investment strategy review, pension commencement, benefit payment,
+  contribution acceptance, asset acquisition or LRBA approval is relied on.
+Cross-reference consequence:
+- Reference decision document page and related transaction amount.
+
+L1.23 SISA section 104 - records of trustee/director changes
+Use when:
+- Trustee changes, corporate trustee changes, director changes or consents appear.
+Cross-reference consequence:
+- Reference trustee/director change page where authority or fund identity matters.
+
+L1.24 SISA section 104A - trustee declarations / recognition of obligations
+Use when:
+- New trustee/director declarations or acknowledgments appear.
+Cross-reference consequence:
+- Reference declaration date/page where trustee authority or compliance onboarding is
+  relevant.
+
+L1.25 SISA section 105 - member reports retained for at least 10 years
+Use when:
+- Member reports, annual member statements or beneficiary reports are used.
+Cross-reference consequence:
+- Reference report page, member name, FY and value.
+
+L1.26 SISA section 106A - notification of change in status
+Use when:
+- Fund status, SMSF status, corporate trustee, member/trustee changes or ATO status
+  changes appear.
+Cross-reference consequence:
+- Reference status-change documents by page.
+
+L1.27 SISA section 109 - arm's-length investment basis
+Use when:
+- Non-arm's-length transactions, related-party rent, low/no interest, non-commercial
+  terms, property rental, private company/trust transactions or NALI/NALE issues appear.
+Cross-reference consequence:
+- Reference the value, related party, market/arm's-length evidence and page source.
+
+L1.28 SISA section 118 - consents to appointments
+Use when:
+- Trustee or director consent evidence is needed.
+Cross-reference consequence:
+- Reference consent page where appointment authority affects document validity.
+
+L1.29 SISA section 120 - disqualified persons
+Use when:
+- Trustee/director eligibility is reviewed.
+Cross-reference consequence:
+- Reference disqualification checks only where present and relevant to SMSF trustee
+  status.
+
+L1.30 SISA sections 128A-128H - approved SMSF auditor registration/obligations
+Use when:
+- Auditor identity, SAN, independence, competency, registration or annual statement
+  issues appear.
+Cross-reference consequence:
+- Reference auditor details only where they support the audit report or regulatory
+  validity.
+
+L1.31 SISA sections 128J-128K - registers of approved/disqualified SMSF auditors
+Use when:
+- Auditor registration/disqualification evidence appears.
+Cross-reference consequence:
+- Reference register evidence page if included.
+
+L1.32 SISA section 129 - auditor obligations where contraventions likely
+Use when:
+- Contraventions are identified or ACR logic is relevant.
+Cross-reference consequence:
+- Reference exact contravention evidence, amount, page and conclusion.
+
+L1.33 SISA Part 20 / sections 157-168 - SMSF administrative directions and penalties
+Use when:
+- Rectification direction, education direction, administrative penalty or breach
+  consequence appears.
+Cross-reference consequence:
+- Reference contravention amount/page and penalty/direction document page.
+
+================================================================================
+L2. SUPERANNUATION INDUSTRY (SUPERVISION) REGULATIONS 1994 - ADDITIONAL HOOKS
+================================================================================
+
+L2.1 SISR regulation 1.03 - interpretation
+Use when:
+- Defined terms are relevant, including pension/income stream, permanent incapacity,
+  dependant, member or preserved benefit concepts.
+Cross-reference consequence:
+- Use defined terms carefully; do not invent a pension/benefit status.
+
+L2.2 SISR regulation 1.04AAAA - interdependency relationships
+Use when:
+- Death benefits, dependant status or beneficiary evidence relies on interdependency.
+Cross-reference consequence:
+- Reference beneficiary/dependant evidence page and benefit value.
+
+L2.3 SISR regulation 1.06 - meaning of pension
+Use when:
+- Pension status, minimum payments or income streams are tested.
+Cross-reference consequence:
+- Reference pension commencement documents, minimum calculation, actual payments and
+  bank evidence.
+
+L2.4 SISR regulation 4.09 - investment strategy
+Use when:
+- Investment strategy compliance, asset allocation, risk/liquidity/diversification or
+  insurance consideration appears.
+Cross-reference consequence:
+- Reference investment strategy page and related asset values.
+
+L2.5 SISR regulation 4.09A - separation of fund assets
+Use when:
+- Bank account name, asset title, platform account, property title or trustee personal
+  asset risk appears.
+Cross-reference consequence:
+- Reference fund name/account holder/title page and asset value.
+
+L2.6 SISR regulation 6.01 and Schedule 1 - conditions of release
+Use when:
+- Benefit payments, lump sums, pensions, retirement, death, permanent incapacity,
+  terminal medical condition, severe financial hardship or compassionate release appears.
+Cross-reference consequence:
+- Reference condition-of-release evidence, payment value and bank evidence.
+
+L2.7 SISR regulation 6.01A - terminal medical condition
+Use when:
+- Terminal medical condition benefits appear.
+Cross-reference consequence:
+- Reference medical certification pages and payment value where included.
+
+L2.8 SISR regulation 6.17 - restriction on payment
+Use when:
+- Any benefit payment or early release issue appears.
+Cross-reference consequence:
+- Reference payment value, release condition evidence and bank page.
+
+L2.9 SISR regulation 6.17A - death benefit payment directions
+Use when:
+- Binding death benefit nominations, reversionary pensions or death benefit instructions
+  appear.
+Cross-reference consequence:
+- Reference nomination/instruction page and benefit value.
+
+L2.10 SISR regulations 6.18-6.21 - cashing of preserved/restricted/unrestricted benefits
+Use when:
+- Voluntary or compulsory cashing is reviewed.
+Cross-reference consequence:
+- Reference cashing restriction category, member status and payment values.
+
+L2.11 SISR regulation 7.04 - acceptance of contributions
+Use when:
+- Contributions are received by the SMSF.
+Cross-reference consequence:
+- Reference contribution amount, type, date, member allocation and bank receipt.
+
+L2.12 SISR regulation 7.08 / 7.11 - contributions allocated to members
+Use when:
+- Member allocation of contributions is reviewed.
+Cross-reference consequence:
+- Reference total contribution, member-level allocation, date and bank evidence.
+
+L2.13 SISR regulation 8.02 - accounts and statements
+Use when:
+- Financial statements or annual accounts are reviewed.
+Cross-reference consequence:
+- Reference financial statement values to ledger/TB/external evidence pages.
+
+L2.14 SISR regulation 8.02B - market value
+Use when:
+- Asset valuation is reviewed.
+Cross-reference consequence:
+- Reference asset value to objective valuation evidence, market price, platform,
+  registry, title/appraisal or independent support.
+
+L2.15 SISR regulation 13.12 - assignments of superannuation interests
+Use when:
+- Member interest assignment or security over benefits appears.
+Cross-reference consequence:
+- Reference affected member benefit value and assignment/security evidence.
+
+L2.16 SISR regulation 13.13 - charges over member benefits
+Use when:
+- Charge over member benefits appears.
+Cross-reference consequence:
+- Reference member benefit value and security/charge document page.
+
+L2.17 SISR regulation 13.14 - charges over fund assets
+Use when:
+- Mortgage, charge, security interest or encumbrance over fund asset appears.
+Cross-reference consequence:
+- Reference asset value, charge/security document and LRBA/derivatives exception
+  evidence where relevant.
+
+L2.18 SISR regulation 13.15A - derivative contract charges
+Use when:
+- Derivatives/margin collateral/security appears.
+Cross-reference consequence:
+- Reference derivative exposure, collateral value, risk management statement and
+  security evidence.
+
+L2.19 SISR regulation 13.16 - accrued benefits restriction on alteration
+Use when:
+- Member benefit recalculation, adverse alteration or prior-year member balance
+  adjustment appears.
+Cross-reference consequence:
+- Reference opening balance, adjustment value, member statement and authority.
+
+L2.20 SISR regulation 13.18AA - SMSF collectables and personal-use assets
+Use when:
+- Collectables/personal-use assets appear.
+Cross-reference consequence:
+- Reference asset value, storage, insurance, lease/use and related-party evidence.
+
+L2.21 SISR regulations 13.22A-13.22D - in-house asset related entity rules
+Use when:
+- Related unit trust/company investments appear.
+Cross-reference consequence:
+- Reference investment value, related-entity status, unit/share holding, transactions,
+  lease/loan arrangements and cessation conditions.
+
+================================================================================
+L3. INCOME TAX ASSESSMENT ACT 1997 - ADDITIONAL HOOKS
+================================================================================
+
+L3.1 ITAA 1997 Division 290 / Subdivision 290-C - personal super contribution deductions
+Use when:
+- Member deduction notices, personal concessional contributions or notice of intent
+  forms appear.
+Cross-reference consequence:
+- Reference contribution amount, notice amount, acknowledgment page and member allocation.
+
+L3.2 ITAA 1997 section 290-170 - notice of intent to deduct
+Use when:
+- Personal concessional contribution deduction claim is being tested.
+Cross-reference consequence:
+- Reference bank receipt, member contribution, notice of intent and trustee
+  acknowledgment by page/value.
+
+L3.3 ITAA 1997 Division 291 - concessional contributions
+Use when:
+- Concessional contribution caps, employer/personal deductible contributions or excess
+  concessional amounts appear.
+Cross-reference consequence:
+- Reference concessional contribution amount, cap/FY, member allocation and evidence.
+
+L3.4 ITAA 1997 Division 292 - non-concessional contributions
+Use when:
+- Non-concessional contribution caps, bring-forward, downsizer, CGT cap or excess
+  non-concessional amounts appear.
+Cross-reference consequence:
+- Reference amount, contribution type, cap/FY and eligibility evidence.
+
+L3.5 ITAA 1997 section 292-90 - non-concessional contributions for a financial year
+Use when:
+- A contribution is classified as non-concessional.
+Cross-reference consequence:
+- Reference source amount, member allocation and classification support.
+
+L3.6 ITAA 1997 section 292-100 - CGT small business concession contribution
+Use when:
+- CGT cap contribution appears.
+Cross-reference consequence:
+- Reference contribution amount, election/form, sale/CGT evidence and member allocation.
+
+L3.7 ITAA 1997 section 292-102 - downsizer contributions
+Use when:
+- Downsizer contributions appear.
+Cross-reference consequence:
+- Reference contribution amount, downsizer form, eligibility evidence and bank receipt.
+
+L3.8 ITAA 1997 Division 293 - high income super contributions tax
+Use when:
+- Division 293 tax release or assessment appears.
+Cross-reference consequence:
+- Reference assessment amount, release authority amount and payment evidence.
+
+L3.9 ITAA 1997 Division 294 - transfer balance cap
+Use when:
+- Retirement phase income streams, pension commencements, commutations, death benefit
+  pensions or transfer balance account evidence appears.
+Cross-reference consequence:
+- Reference transfer balance credit/debit value, commencement date, pension value and
+  any commutation/payment evidence.
+
+L3.10 ITAA 1997 section 294-55 - LRBA repayment transfer balance credit rule
+Use when:
+- LRBA repayment and pension/member retirement phase interest interact.
+Cross-reference consequence:
+- Reference LRBA repayment value, member interest, pension status and transfer balance
+  evidence where included.
+
+L3.11 ITAA 1997 sections 295-385 and 295-390 - exempt current pension income
+Use when:
+- ECPI, actuarial certificates, retirement phase income, segregated assets or
+  unsegregated method appears.
+Cross-reference consequence:
+- Reference ECPI percentage/value, actuarial certificate page, pension liabilities and
+  tax calculation.
+
+L3.12 ITAA 1997 section 295-550 - non-arm's length income
+Use when:
+- Related-party non-commercial income, rent, dividends, trust distributions, expenses or
+  NALE/NALI analysis appears.
+Cross-reference consequence:
+- Reference income/expense amount, related party, market evidence and tax treatment.
+
+L3.13 ITAA 1997 Subdivision 295-I - no-TFN contributions income
+Use when:
+- No-TFN contributions tax appears.
+Cross-reference consequence:
+- Reference contribution amount, TFN status and tax calculation.
+
+L3.14 ITAA 1997 Division 102 / CGT provisions
+Use when:
+- Asset disposals, capital gains/losses, property/share sales or CGT events appear.
+Cross-reference consequence:
+- Reference proceeds, cost base, gain/loss calculation and external sale evidence.
+
+L3.15 ITAA 1997 Division 115 - CGT discount
+Use when:
+- Discount capital gains appear.
+Cross-reference consequence:
+- Reference acquisition/disposal dates, gain value and discount calculation.
+
+L3.16 ITAA 1997 Division 307 - superannuation benefits
+Use when:
+- Benefit components, taxable/tax-free components, lump sums or pension payments appear.
+Cross-reference consequence:
+- Reference benefit amount, component split and payment evidence.
+
+L3.17 ITAA 1997 section 995-1 - dictionary
+Use when:
+- Terms such as financial year, superannuation income stream, SIS dependant, retirement
+  phase, concessional contribution, non-concessional contribution or superannuation
+  benefit are used.
+Cross-reference consequence:
+- Do not use defined terms loosely where a value turns on classification.
+
+================================================================================
+L4. TAXATION ADMINISTRATION ACT 1953 - ADDITIONAL HOOKS
+================================================================================
+
+L4.1 TAA Schedule 1 Division 97 - excess contributions determinations
+Use when:
+- Excess concessional or non-concessional contribution determinations appear.
+Cross-reference consequence:
+- Reference determination amount, FY, member and release/payment evidence.
+
+L4.2 TAA Schedule 1 Division 131 - releasing money from superannuation
+Use when:
+- Release authorities for excess contributions, Division 293 tax or FHSS appear.
+Cross-reference consequence:
+- Reference release authority amount, fund payment and bank statement/payment page.
+
+L4.3 TAA Schedule 1 Division 135 - release authorities for debt account discharge liability
+Use when:
+- Debt account release authority appears.
+Cross-reference consequence:
+- Reference release amount and payment evidence.
+
+L4.4 TAA Schedule 1 Division 136 - transfer balance cap determinations and commutation authorities
+Use when:
+- Excess transfer balance determination or commutation authority appears.
+Cross-reference consequence:
+- Reference determination amount, commuted amount, pension account and payment evidence.
+
+L4.5 TAA Schedule 1 Division 390 - superannuation reporting
+Use when:
+- Member information statements, rollover benefit statements, release authority
+  statements, TBAR-style reporting or ATO super reporting appears.
+Cross-reference consequence:
+- Reference reported amount, date/FY, member and source document page.
+
+L4.6 TAA Schedule 1 section 388-85 - truncating amounts
+Use when:
+- Official forms or statements use whole-dollar truncation/rounding.
+Cross-reference consequence:
+- State when differences are due to truncation/rounding only if the source supports it.
+
+================================================================================
+L5. SUPERANNUATION GUARANTEE (ADMINISTRATION) ACT 1992 - ADDITIONAL HOOKS
+================================================================================
+
+L5.1 SGAA section 16 - charge payable by employer
+Use when:
+- Employer SG shortfall, unpaid SG, super guarantee charge or employer contribution
+  compliance appears.
+Cross-reference consequence:
+- Reference employer contribution amount, quarter/FY, employer and bank receipt.
+
+L5.2 SGAA section 17 - superannuation guarantee shortfall
+Use when:
+- SG shortfall calculations appear.
+Cross-reference consequence:
+- Reference ordinary time earnings, charge percentage, contribution paid and shortfall
+  amount.
+
+L5.3 SGAA section 19 - individual superannuation guarantee shortfalls
+Use when:
+- Employee/member-level SG shortfalls appear.
+Cross-reference consequence:
+- Reference employee/member value, quarter, earnings base and amount contributed.
+
+L5.4 SGAA section 23 - reduction of charge percentage where contributions made
+Use when:
+- Employer contributions are tested against SG obligations.
+Cross-reference consequence:
+- Reference contribution date, amount, fund, employee/member and quarter.
+
+L5.5 SGAA section 23A - offsetting late payments against charge
+Use when:
+- Late SG payments are applied against SGC.
+Cross-reference consequence:
+- Reference late payment amount, period, allocation and ATO/employer evidence.
+
+L5.6 SGAA section 23B - approved clearing house contributions
+Use when:
+- Clearing house payments appear.
+Cross-reference consequence:
+- Reference clearing-house payment date/amount and fund receipt date/amount.
+
+L5.7 SGAA Part 3A - choice of fund requirements
+Use when:
+- Choice forms, stapled fund issues, employer-chosen fund or employee fund nomination
+  appears.
+Cross-reference consequence:
+- Reference choice form/fund nomination and related contribution amount.
+
+================================================================================
+L6. CORPORATIONS ACT 2001 - ADDITIONAL HOOKS FOR CORPORATE TRUSTEES
+================================================================================
+
+L6.1 Corporations Act section 119 / company registration
+Use when:
+- Corporate trustee existence or ACN search is used.
+Cross-reference consequence:
+- Reference ASIC search page, ACN and corporate trustee name where source reliability
+  or execution authority matters.
+
+L6.2 Corporations Act section 120 - members/directors/secretary of a company
+Use when:
+- Corporate trustee officeholders are relevant.
+Cross-reference consequence:
+- Reference officeholder page only if authority or fund structure matters.
+
+L6.3 Corporations Act section 124 - legal capacity and powers
+Use when:
+- Corporate trustee capacity to hold assets, contract or execute documents is relevant.
+Cross-reference consequence:
+- Reference corporate trustee identity and document execution.
+
+L6.4 Corporations Act section 127 - execution of company documents
+Use when:
+- Deeds, contracts, loan documents, trustee documents, property contracts or minutes
+  are executed by a corporate trustee.
+Cross-reference consequence:
+- Reference signature/execution page and transaction value.
+
+L6.5 Corporations Act sections 128-129 - statutory assumptions
+Use when:
+- Reliance on corporate execution or officer authority appears.
+Cross-reference consequence:
+- Reference ASIC/officer evidence and execution page where relevant.
+
+L6.6 Corporations Act section 201A - minimum number of directors
+Use when:
+- Corporate trustee/director structure appears.
+Cross-reference consequence:
+- Reference ASIC extract only where corporate trustee validity or SMSF structure is
+  being assessed.
+
+L6.7 Corporations Act section 201B - who can be a director
+Use when:
+- Director eligibility or appointment issue appears.
+Cross-reference consequence:
+- Reference director details only where relevant.
+
+L6.8 Corporations Act section 286 - obligation to keep financial records
+Use when:
+- Corporate trustee financial records or company-as-trustee transaction records are
+  relevant.
+Cross-reference consequence:
+- This reinforces the no-covering-evidence rule: source records must remain readable.
+
+L6.9 Corporations Act sections 287-290 - language, form, place and access to records
+Use when:
+- Corporate records are reviewed or records are not in English or are not accessible.
+Cross-reference consequence:
+- Reference record pages and note any accessibility/language issue if present.
+
+L6.10 Corporations Act section 588G - insolvent trading
+Use when:
+- Corporate trustee solvency/debt issue is actually raised in the file.
+Cross-reference consequence:
+- Do not annotate unless there is direct document evidence. If relevant, reference the
+  debt amount, date and solvency evidence.
+
+================================================================================
+L7. OTHER FEDERAL LEGISLATIVE INSTRUMENTS THAT MAY MATTER
+================================================================================
+
+L7.1 Superannuation Auditor Registration Imposition Act 2012
+Use when:
+- Auditor registration fees or ASIC approved SMSF auditor registration cost appears.
+Cross-reference consequence:
+- Usually not part of financial value matching unless auditor registration validity is
+  at issue.
+
+L7.2 Legislation Act 2003
+Use when:
+- Compilation/currentness, legislative instruments, Federal Register status or
+  incorporated standards are questioned.
+Cross-reference consequence:
+- Cite current compilation status where a law/current-source issue is material.
+
+L7.3 Tax Agent Services Act 2009
+Use when:
+- Tax agent/BAS agent services, adviser registration, tax advice or conduct appears.
+Cross-reference consequence:
+- Usually not used unless the documents include tax-agent authority or service provider
+  status relevant to the SMSF file.
+
+L7.4 Anti-Money Laundering and Counter-Terrorism Financing Act 2006
+Use when:
+- Identity verification/AML source material is included.
+Cross-reference consequence:
+- Usually not central to SMSF audit value matching; use only if source document relies
+  on AML/KYC identity evidence.
+
+L7.5 Electronic Transactions Act 1999
+Use when:
+- Electronic signatures, electronic records, digital execution or electronic statements
+  are in issue.
+Cross-reference consequence:
+- Reference execution/signature pages only where validity/source reliability is in issue.
+
+L7.6 Privacy Act 1988
+Use when:
+- TFNs, member identity documents or personal information are included.
+Cross-reference consequence:
+- Do not over-annotate sensitive personal identifiers. Reference only what is necessary
+  for identity/source reliability.
+
+================================================================================
+L8. STATE/TERRITORY PROPERTY LAW NOTE
+================================================================================
+
+Status:
+- Property ownership/title evidence is often governed by State or Territory land titles
+  legislation and land registry systems.
+- The exact Act varies by jurisdiction.
+- Do not cite a State/Territory land title statute unless the property jurisdiction is
+  identified in the source document.
+
+Operational rule:
+- If the SMSF owns real property, first identify the State/Territory and title evidence.
+- Then cite the relevant title search/land registry evidence by page and property value.
+- Do not infer ownership from a property address alone.
+- Reference title holder, property address, valuation amount, rental amount and loan/LRBA
+  amount separately.
+
+================================================================================
+L9. UPDATED PRIORITY MATRIX AFTER ADDING MORE LAW
+================================================================================
+
+Priority 1 - always assess if present:
+- Fund name and FY/year ended on first source page or nearest reliable page.
+- Financial statement totals.
+- Bank balances and bank transactions.
+- Contribution totals and member allocations.
+- Pension/benefit payment amounts.
+- Investment and portfolio values.
+- Term deposit principal and interest.
+- Property values, rental income and ownership/title.
+- Loan/LRBA balances, interest and repayment amounts.
+- Tax/ECPI/NALI/CGT values.
+- In-house asset values and related-party values.
+- Unsupported or mismatching values.
+
+Priority 2 - assess if tied to a value/compliance point:
+- Trustee/director details.
+- Corporate trustee ACN/officeholders/execution.
+- Member/dependant relationship evidence.
+- Condition of release evidence.
+- Contribution eligibility/cap evidence.
+- Market valuation method/date.
+- ATO determinations/release authorities.
+- SG/clearing-house contribution evidence.
+- Auditor registration/SAN if audit report validity is in issue.
+
+Priority 3 - do not annotate unless needed:
+- Logos.
+- Generic headings.
+- Boilerplate text.
+- Generic report paragraphs.
+- Contact details.
+- Internal codes that do not affect evidence.
+
+================================================================================
+L10. UPDATED AI NON-ASSUMPTION RULE
+================================================================================
+
+The model must not assume:
+- fund identity;
+- financial year;
+- SMSF status;
+- compliance status;
+- contribution type;
+- pension status;
+- condition of release;
+- relationship/related-party status;
+- asset ownership;
+- market value support;
+- LRBA status;
+- corporate trustee authority;
+- GST/tax treatment;
+- ECPI entitlement;
+- NALI/NALE issue;
+- rounding/truncation;
+- auditor registration/independence.
+
+The model may only mark what is visible or supported by the documents. If a value is
+not supported, the label must say "no direct support found" or "partly supported by",
+not "agrees with".
+
+================================================================================
+L11. ADDITIONAL OFFICIAL SOURCE ITEMS ADDED IN THIS PASS
+================================================================================
+
+151. Superannuation Industry (Supervision) Act 1993, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A04633
+
+152. Superannuation Industry (Supervision) Act 1993 section 17A - definition of self managed superannuation fund:
+     https://www.legislation.gov.au/C2004A04633/2015-07-01/2015-07-01/text/original/epub/OEBPS/document_1/document_1.html
+
+153. Superannuation Industry (Supervision) Act 1993 section 52B - covenants for SMSFs:
+     https://www.legislation.gov.au/Details/C2016C00236
+
+154. Superannuation Industry (Supervision) Act 1993 sections 103-105 - minutes, trustee-change records and reports:
+     https://www.legislation.gov.au/C2004A04633/1993-12-01/1993-12-01/text/original/pdf
+
+155. Superannuation Industry (Supervision) Act 1993 section 109 - arm's-length investment basis:
+     https://www.legislation.gov.au/C2004A04633/2022-09-28
+
+156. Superannuation Industry (Supervision) Act 1993 sections 128A-128H and 128J-128K - approved SMSF auditor registration/obligations/registers:
+     https://www.legislation.gov.au/C2004A04633/2023-10-01/2023-10-01/text/original/epub/OEBPS/document_2/document_2.html
+
+157. Superannuation Industry (Supervision) Act 1993 section 129 - obligations of actuaries and auditors:
+     https://www.legislation.gov.au/C2004A04633/2023-10-01/2023-10-01/text/original/epub/OEBPS/document_2/document_2.html
+
+158. Superannuation Industry (Supervision) Regulations 1994, latest Federal Register:
+     https://www.legislation.gov.au/Latest/F2021C01293
+
+159. Superannuation Industry (Supervision) Regulations 1994 regulations 6.17-6.21 and Schedule 1 - benefit payment/release conditions:
+     https://www.legislation.gov.au/F1996B00580/2021-06-25/text
+
+160. Superannuation Industry (Supervision) Regulations 1994 regulation 7.04 - acceptance of contributions:
+     https://www.legislation.gov.au/F1996B00580/2024-12-07/2024-12-07/text/original/epub/OEBPS/document_1/document_1.html
+
+161. Superannuation Industry (Supervision) Regulations 1994 regulations 7.08 and 7.11 - contributions allocated to members:
+     https://www.legislation.gov.au/Details/F2021C01293
+
+162. Superannuation Industry (Supervision) Regulations 1994 regulations 13.12-13.16 - assignments, charges and accrued benefits:
+     https://www.legislation.gov.au/F1996B00580/1999-02-11/1999-02-11/text/original/epub/OEBPS/document_1/document_1.html
+
+163. Superannuation Industry (Supervision) Regulations 1994 regulation 13.18AA and Division 13.3A - collectables/personal-use assets and in-house asset related-entity rules:
+     https://www.legislation.gov.au/Details/F2021C01293
+
+164. Income Tax Assessment Act 1997, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2016C00760
+
+165. Income Tax Assessment Act 1997 Subdivision 290-C and section 290-170 - personal contribution deductions and notice of intent:
+     https://www.legislation.gov.au/C2004A05138/2009-01-01/2009-01-01/text/original/epub/OEBPS/document_6/document_6.html
+
+166. Income Tax Assessment Act 1997 Division 292 - excess non-concessional contributions, downsizer and CGT cap contribution sections:
+     https://www.legislation.gov.au/Latest/C2016C00760
+
+167. Income Tax Assessment Act 1997 Division 293 - high income super contributions tax:
+     https://www.legislation.gov.au/C2004A05138/2025-07-01/2025-07-01/text/original/epub/OEBPS/document_6/document_6.html
+
+168. Income Tax Assessment Act 1997 Division 294 - transfer balance cap:
+     https://www.legislation.gov.au/C2004A05138/2019-12-12/2019-12-12/text/original/epub/OEBPS/document_6/document_6.html
+
+169. Income Tax Assessment Act 1997 sections 295-385 and 295-390 - exempt current pension income:
+     https://www.legislation.gov.au/C2004A05138/2022-10-14/2022-10-14/text/1/epub/OEBPS/document_6/document_6.html
+
+170. Income Tax Assessment Act 1997 section 295-550 - non-arm's length income:
+     https://www.legislation.gov.au/C2004A05138/2020-10-01/2020-10-01/text/original/epub/OEBPS/document_6/document_6.html
+
+171. Taxation Administration Act 1953, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C1953A00001
+
+172. Taxation Administration Act 1953 Schedule 1 Division 97 - excess contributions determinations:
+     https://www.legislation.gov.au/C1953A00001/2025-08-03/2025-08-03/text/original/epub/OEBPS/document_2/document_2.html
+
+173. Taxation Administration Act 1953 Schedule 1 Division 131 - release authorities:
+     https://www.legislation.gov.au/C1953A00001/2021-04-04/2021-04-04/text/1/epub/OEBPS/document_2/document_2.html
+
+174. Taxation Administration Act 1953 Schedule 1 Division 136 - transfer balance cap determinations:
+     https://www.legislation.gov.au/C1953A00001/2021-09-01/2021-09-01/text/1/pdf/2
+
+175. Taxation Administration Act 1953 Schedule 1 Division 390 - superannuation reporting:
+     https://www.legislation.gov.au/Details/C2023C00120
+
+176. Superannuation Guarantee (Administration) Act 1992, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A04402
+
+177. Superannuation Guarantee (Administration) Act 1992 sections 16, 17, 19, 23, 23A and 23B:
+     https://www.legislation.gov.au/C2004A04402/2022-02-23/2022-02-23/text/original/epub/OEBPS/document_1/document_1.html
+
+178. Corporations Act 2001, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A00818
+
+179. Corporations Act 2001 section 127 - execution of documents:
+     https://www.legislation.gov.au/C2004A00818/2017-09-28/2017-09-28/text/1/epub/OEBPS/document_1/document_1.html
+
+180. Corporations Act 2001 section 201A - minimum number of directors:
+     https://www.legislation.gov.au/C2004A00818/2021-08-02/2021-08-02/text/original/epub/OEBPS/document_1/document_1.html
+
+181. Corporations Act 2001 section 286 - financial records:
+     https://www.legislation.gov.au/C2004A00818/2019-07-01/2019-07-01/text/1/epub/OEBPS/document_2/document_2.html
+
+182. Corporations Act 2001 section 588G - insolvent trading:
+     https://www.legislation.gov.au/C2004A00818/2001-09-27/2001-09-27/text/original/epub/OEBPS/document_2/document_2.html
+
+183. Electronic Transactions Act 1999, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A00553
+
+184. Privacy Act 1988, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A03712
+
+185. Tax Agent Services Act 2009, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2009A00013
+
+186. Legislation Act 2003, latest Federal Register:
+     https://www.legislation.gov.au/Latest/C2004A01224
+
+================================================================================
+END LAW EXPANSION
+================================================================================
+
+================================================================================
+SOURCE REGISTER
+================================================================================
+
+The prior 120+ source register is retained below. The register separates formal
+authority from operational support. Formal authority comes from Australian legislation,
+AUASB, ATO, ASIC, AGLC and Australian Government guidance. Non-government PDF
+annotation-tool sources, if used elsewhere, are tool-mechanics support only and are not
+legal authority.
+
+12. SOURCE REGISTER - 120+ OFFICIAL / AUTHORITATIVE SOURCE ITEMS
+================================================================================
+
+A. Australian legislation and legislative provisions
+
+001. Superannuation Industry (Supervision) Act 1993 (Cth), consolidated Act - Federal Register of Legislation - https://www.legislation.gov.au/C2004A04633
+002. SISA section 17A - definition of self managed superannuation fund - Federal Register / ATO Law view.
+003. SISA section 35 - objects of Part 4 accounts, audit and reporting obligations - Federal Register.
+004. SISA section 35A - accounting records for superannuation entities - Federal Register.
+005. SISA section 35AE - SMSF accounting records; transactions, financial position, auditability - Federal Register / ATO Law view.
+006. SISA section 35B - SMSF accounts and statements - Federal Register / ATO Law view.
+007. SISA section 35C - audit of accounts and statements; approved SMSF auditor report - Federal Register / ATO Law view.
+008. SISA section 35D - trustee to lodge annual returns - Federal Register / ATO Law view.
+009. SISA section 52B - covenants for SMSF trustees - Federal Register.
+010. SISA section 62 - sole purpose test - Federal Register / ATO Law view.
+011. SISA section 65 - lending/financial assistance to members or relatives - Federal Register / ATO Law view.
+012. SISA section 66 - acquisition of assets from related parties - Federal Register / ATO Law view.
+013. SISA section 67 - borrowing restrictions - Federal Register / ATO Law view.
+014. SISA section 67A - limited recourse borrowing arrangements - Federal Register / ATO Law view.
+015. SISA section 67B - replacement assets under LRBAs - Federal Register / ATO Law view.
+016. SISA section 69 - who is a related party of a superannuation fund - Federal Register / ATO Law view.
+017. SISA section 70B - meaning of Part 8 associate - Federal Register / ATO Law view.
+018. SISA section 71 - meaning of in-house asset - Federal Register / ATO Law view.
+019. SISA section 82 - in-house asset rules overview - Federal Register.
+020. SISA section 83 - acquisition of in-house assets - Federal Register / ATO Law view.
+021. SISA section 84 - duty to comply with in-house asset rules - Federal Register.
+022. SISA section 85 - anti-avoidance for in-house asset rules - Federal Register / ATO Law view.
+023. SISA section 109 - investments to be made and maintained on arm's-length basis - Federal Register / ATO Law view.
+024. SISA section 126A - disqualified persons - Federal Register.
+025. SISA section 128A - approved SMSF auditors - Federal Register.
+026. SISA section 128B - application for registration as approved SMSF auditor - Federal Register.
+027. SISA section 128C - registration of approved SMSF auditors - Federal Register.
+028. SISA section 128D - conditions on SMSF auditor registration - Federal Register.
+029. SISA section 128E - cancellation/suspension of SMSF auditor registration - Federal Register.
+030. SISA section 128F - ongoing obligations of approved SMSF auditors - Federal Register / ATO guidance.
+031. SISA section 129 - auditor reporting obligations/contraventions - Federal Register / ATO guidance.
+032. SISA section 130 - unsatisfactory financial position - Federal Register / ATO guidance.
+033. Superannuation Industry (Supervision) Regulations 1994 (Cth), consolidated Regulations - Federal Register of Legislation - https://www.legislation.gov.au/F1996B00580
+034. SISR regulation 1.03 - interpretation - Federal Register.
+035. SISR regulation 4.09 - investment strategy operating standard - Federal Register / ATO Law view.
+036. SISR regulation 4.09A - SMSF money and assets to be kept separate - Federal Register / ATO guidance.
+037. SISR regulation 5.01 - definitions related to member benefits - Federal Register.
+038. SISR regulation 6.17 - restrictions on payment of benefits - Federal Register / ATO Law view.
+039. SISR regulation 6.17A - death benefit payment directions - Federal Register / ATO Law view.
+040. SISR regulation 6.18 - preservation rules / payment standards context - Federal Register.
+041. SISR regulation 7.04 - acceptance of contributions - Federal Register.
+042. SISR regulation 8.02 - accounts and statements - Federal Register / ATO Law view.
+043. SISR regulation 8.02A - period within which auditor must be appointed - Federal Register.
+044. SISR regulation 8.02B - assets must be valued at market value - Federal Register.
+045. SISR regulation 8.03 - audit report period after documents provided - Federal Register.
+046. SISR regulation 9.04 - unsatisfactory financial position context - Federal Register.
+047. SISR regulation 9A.04 - CPD requirements for approved SMSF auditors - Federal Register / ATO guidance.
+048. SISR regulation 9A.05 - professional indemnity insurance requirements - Federal Register / ATO guidance.
+049. SISR regulation 9A.06 - APES 110 independence requirement - Federal Register / ATO guidance.
+050. SISR regulation 13.17A - charges over assets / exceptions context - Federal Register.
+051. Income Tax Assessment Act 1997 (Cth), superannuation tax provisions, consolidated Act - Federal Register - https://www.legislation.gov.au/C2004A05138
+052. ITAA 1997 Division 295 - taxation of complying superannuation funds - Federal Register / ATO Law.
+053. ITAA 1997 section 295-385 - exempt current pension income method context - Federal Register / ATO Law.
+054. ITAA 1997 section 295-390 - segregated current pension assets context - Federal Register / ATO Law.
+055. ITAA 1997 section 290-170 - notice of intent to deduct personal super contributions - Federal Register / ATO Law.
+056. Superannuation Guarantee (Administration) Act 1992 (Cth), employer contribution context - Federal Register - https://www.legislation.gov.au/C2004A04415
+057. Taxation Administration Act 1953 (Cth), administrative reporting/penalty context - Federal Register - https://www.legislation.gov.au/C1953A00001
+058. Corporations Act 2001 (Cth), audit/ASIC and corporate trustee context - Federal Register - https://www.legislation.gov.au/C2004A00818
+059. Australian Securities and Investments Commission Act 2001 (Cth), AUASB/ASIC functions context - Federal Register - https://www.legislation.gov.au/C2004A00818 or ASIC Act register page.
+060. Acts Interpretation Act 1901 (Cth), legislative interpretation context - Federal Register - https://www.legislation.gov.au/C1901A00002
+
+B. AUASB auditing / assurance standards and guidance
+
+061. ASA 200 Overall Objectives of the Independent Auditor - AUASB - https://standards.auasb.gov.au/asa-200-mar-2021
+062. ASA 210 Agreeing the Terms of Audit Engagements - AUASB.
+063. ASA 220 Quality Management for an Audit of a Financial Report - AUASB.
+064. ASA 230 Audit Documentation - AUASB - https://standards.auasb.gov.au/asa-230-apr-2022
+065. ASA 240 Auditor Responsibilities Relating to Fraud - AUASB.
+066. ASA 250 Consideration of Laws and Regulations - AUASB.
+067. ASA 260 Communication with Those Charged with Governance - AUASB.
+068. ASA 300 Planning an Audit of a Financial Report - AUASB.
+069. ASA 315 Identifying and Assessing Risks of Material Misstatement - AUASB.
+070. ASA 320 Materiality in Planning and Performing an Audit - AUASB - https://standards.auasb.gov.au/asa-320-apr-2022
+071. ASA 330 The Auditor's Responses to Assessed Risks - AUASB.
+072. ASA 450 Evaluation of Misstatements Identified during the Audit - AUASB - https://standards.auasb.gov.au/asa-450-may-2017
+073. ASA 500 Audit Evidence - AUASB - https://standards.auasb.gov.au/asa-500-mar-2021
+074. ASA 505 External Confirmations - AUASB.
+075. ASA 520 Analytical Procedures - AUASB.
+076. ASA 530 Audit Sampling - AUASB.
+077. ASA 540 Auditing Accounting Estimates and Related Disclosures - AUASB.
+078. ASA 550 Related Parties - AUASB.
+079. ASA 560 Subsequent Events - AUASB.
+080. ASA 570 Going Concern - AUASB.
+081. ASA 580 Written Representations - AUASB.
+082. ASA 600 Special Considerations - Group Audits - AUASB.
+083. ASA 610 Using the Work of Internal Auditors - AUASB.
+084. ASA 620 Using the Work of an Auditor's Expert - AUASB.
+085. ASA 700 Forming an Opinion and Reporting on a Financial Report - AUASB.
+086. ASA 705 Modifications to the Opinion in the Independent Auditor's Report - AUASB.
+087. ASA 706 Emphasis of Matter and Other Matter Paragraphs - AUASB.
+088. ASAE 3000 Assurance Engagements Other than Audits or Reviews of Historical Financial Information - AUASB.
+089. ASAE 3100 Compliance Engagements - AUASB.
+090. GS 009 Auditing Self-Managed Superannuation Funds - AUASB - https://standards.auasb.gov.au/gs-009-jun-2020
+091. GS 009 Appendix 3 Governing Rules Checklist - AUASB.
+092. GS 009 Appendix 4 Illustrative Financial Audit Procedures for an SMSF - AUASB.
+093. GS 009 paragraphs 120-122 audit documentation - AUASB.
+094. ASA 230 paragraph A11 completion memorandum/cross-reference guidance - AUASB.
+095. ASA 230 paragraph A12 identifying characteristics - AUASB.
+
+C. ATO SMSF auditor official guidance
+
+096. ATO - Providing SMSF audit documentation - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/audit-documentation
+097. ATO - What we look for when auditing an SMSF auditor / approved auditor checklist - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/in-detail/smsf-resources/approved-smsf-auditor-checklist
+098. ATO - Financial audit of an SMSF - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/financial-audit-of-an-smsf
+099. ATO - Compliance audit of an SMSF - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/compliance-audit
+100. ATO - SMSF auditor reporting requirements - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/smsf-auditor-reporting-requirements
+101. ATO - Verifying the market value of fund assets - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/verifying-the-market-value-of-fund-assets
+102. ATO - Market valuation of assets and the role of auditors - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/smsf-newsroom/market-valuation-of-assets-and-the-role-of-auditors
+103. ATO - Valuation guidelines for self-managed super funds - https://www.ato.gov.au/smsfvaluations
+104. ATO - Ownership and separation of fund assets - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/ownership-and-separation-of-fund-assets
+105. ATO - Verifying ownership and asset separation during SMSF audit - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/smsf-newsroom/verifying-ownership-and-asset-separation-during-smsf-audit
+106. ATO - Audit evidence for downsizer contributions - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/audit-evidence-for-downsizer-contributions
+107. ATO - Exempt current pension income method checklist - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/in-detail/smsf-resources/smsf-technical-pensions/exempt-current-pension-income-method-checklist
+108. ATO - Auditing an SMSF that is winding up - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/auditing-an-smsf-that-is-winding-up
+109. ATO - SMSF auditor independence - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/auditor-independence
+110. ATO - SMSF auditor independence compliance focuses - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf/auditor-independence/smsf-auditor-independence-compliance-focuses
+111. ATO - SMSF auditor professional requirements - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/professional-requirements
+112. ATO - Auditing an SMSF overview - https://www.ato.gov.au/tax-and-super-professionals/for-superannuation-professionals/smsf-auditors/auditing-an-smsf
+113. ATO - SMSF borrowing restrictions - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/smsf-investing/restrictions-on-smsf-investments/smsf-borrowing-restrictions
+114. ATO - About limited recourse borrowing arrangements - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/smsf-investing/restrictions-on-smsf-investments/smsf-borrowing-restrictions/limited-recourse-borrowing-arrangements/about-lrbas
+115. ATO - Rules for entering an LRBA - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/smsf-investing/restrictions-on-smsf-investments/smsf-borrowing-restrictions/limited-recourse-borrowing-arrangements/rules-for-entering-an-lrba
+116. ATO - Limited recourse borrowing arrangements questions and answers - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/in-detail/smsf-resources/smsf-technical/limited-recourse-borrowing-arrangements-questions-and-answers
+117. ATO - 15f Limited recourse borrowing arrangements annual return instructions - https://www.ato.gov.au/forms-and-instructions/self-managed-superannuation-fund-annual-return-2019-instructions/instructions-to-complete-your-annual-return/section-h-assets-and-liabilities/15f-limited-recourse-borrowing-arrangements
+118. ATO - Appoint an SMSF auditor - https://www.ato.gov.au/individuals-and-families/super-for-individuals-and-families/self-managed-super-funds-smsf/administering-and-reporting/appoint-an-smsf-auditor
+119. ATO - SMSF annual return instructions, assets and liabilities section - ATO forms/instructions.
+120. ATO - Trustee declaration / SMSF trustee declaration guidance - ATO SMSF administration guidance.
+121. ATO - Contributions and rollovers for SMSFs - ATO SMSF contributions guidance.
+122. ATO - Paying benefits from an SMSF - ATO SMSF pensions/benefits guidance.
+123. ATO - In-house audit review results / auditor compliance newsroom - ATO SMSF newsroom.
+124. ATO - SAN misuse / SMSF auditor number misuse guidance - ATO SMSF auditor guidance.
+125. ATO - Auditor/actuary contravention report instructions - ATO forms/instructions.
+
+D. ASIC / APES / professional obligations
+
+126. ASIC - SMSF auditors overview - https://asic.gov.au/smsf-auditor
+127. ASIC - Applying for SMSF auditor registration - ASIC SMSF auditor registration guidance.
+128. ASIC - Ongoing obligations as an SMSF auditor - ASIC guidance.
+129. ASIC - Auditor independence and audit quality - ASIC guidance.
+130. ASIC - SMSF auditor register - ASIC registers.
+131. ASIC - Enforcement releases/actions against SMSF auditors - ASIC media releases.
+132. APESB - APES 110 Code of Ethics for Professional Accountants including Independence Standards - https://apesb.org.au/apes-110-code-of-ethics
+133. APESB - Independence Guide - APESB guidance.
+
+E. Legal citation / readability / accessibility
+
+134. Australian Guide to Legal Citation, Fourth Edition (uploaded file, 2018; minor corrections 2019 and 2020).
+135. AGLC - cardinal principles of clarity and consistency.
+136. AGLC - cross-references for subsequent references.
+137. AGLC - pinpoint references to specific page/paragraph/footnote/section.
+138. AGLC - legislation citation and specific legislative pinpoints.
+139. AGLC - numerals for pages, sections, paragraphs and citation elements.
+140. AGLC - currency amounts as numerals with currency symbol/denominator.
+141. Australian Government Style Manual - plain language - https://www.stylemanual.gov.au/style-manual-resources/quick-guides/quick-guide-plain-language
+142. Australian Government Style Manual - keep it simple / plain language.
+143. Australian Government Style Manual - numbers and measurements - https://www.stylemanual.gov.au/grammar-punctuation-and-conventions/numbers-and-measurements
+144. Australian Government Style Manual - currency - https://www.stylemanual.gov.au/grammar-punctuation-and-conventions/numbers-and-measurements/currency
+145. Australian Government Style Manual - mathematical relationships - https://www.stylemanual.gov.au/grammar-punctuation-and-conventions/numbers-and-measurements/mathematical-relationships
+146. Australian Government Style Manual - tables - https://www.stylemanual.gov.au/structuring-content/tables
+147. Australian Government Style Manual - accessible and inclusive content - https://www.stylemanual.gov.au/accessible-and-inclusive-content
+148. Australian Government Style Manual - make content accessible.
+149. Australian Government design guidance - colour and contrast - agriculture.gov.au design system.
+150. WCAG 2.1 non-text contrast, used by accessibility guidance as benchmark - W3C.
+
+================================================================================
+13. FINAL STANDARD TO USE BEFORE ANY PDF ANNOTATION WORK
+================================================================================
+
+Before annotation:
+1. Build a value inventory.
+2. Match each internal value to external evidence.
+3. Decide whether each target is material/high-risk/supporting/exception.
+4. Prepare labels using page + value + plain-word result.
+5. Use only permitted visible markup.
+6. Render/inspect the annotated page.
+7. Fix all overlap, fill, clutter, page/value omissions, and ambiguity before delivery.
+
+Final rule:
+
+    The annotation is acceptable only if a reader can see the exact number, read the exact page/value reference, understand whether it agrees or does not agree, and still read every part of the original evidence.
+
+================================================================================
+STRICT FAILURE RULES + YOUTUBE / TUTORIAL MARKUP LESSONS
+================================================================================
+
+Status:
+- This section is a strict AI-model operating section.
+- It must be read before any future SMSF PDF cross-reference task.
+- It preserves the formal standard above and adds explicit failure-prevention rules.
+- Tutorial/vendor sources are used only for PDF annotation mechanics.
+- They are not legal authority.
+- Australian law, AUASB, ATO, ASIC, AGLC and Australian Government guidance remain
+  the formal authority base.
+
+================================================================================
+YT0. WHAT THE YOUTUBE / TUTORIAL MATERIAL ADDED
+================================================================================
+
+The tutorial material confirms the mechanics of professional PDF callouts and markups:
+
+1. A callout is not just a line or a random text box.
+   It is a text box connected to an endpoint/leader line that points to a specific
+   place in the document.
+
+2. The text box and the leader endpoint can be moved independently.
+   Therefore, if the leader crosses text, points vaguely, or makes clutter, it is a
+   placement failure.
+
+3. Text boxes must be resized or autosized to fit the text.
+   Therefore, overflowing/cut-off text is a direct annotation failure.
+
+4. Fill opacity, line width, text colour, box colour, font size and leader endpoint
+   style are configurable in professional PDF tools.
+   Therefore, filled boxes covering source values are avoidable and unacceptable.
+
+5. Multiple leader lines are possible, but they should not be used casually.
+   Multiple leaders increase clutter and should be avoided unless a single label
+   must point to multiple exact values.
+
+6. Highlight, underline, text box, callout, arrow and shape tools are standard PDF
+   review tools.
+   But standard tools must still be applied with restraint. Their existence does not
+   justify clutter, overlap, or obscuring evidence.
+
+7. YouTube/tutorial guidance on annotation reinforces that PDF markups are for
+   reviewability and communication. For this task, reviewability means page + value +
+   result, not decorative marks.
+
+Tutorial / markup source notes added:
+- YouTube: "How to Create Callout in Bluebeam 2026 (Simple Step)" — teaches insert
+  callouts, type notes, adjust leader lines, format text, resize/move callouts, and
+  fix misplaced arrows or overlapping text.
+- YouTube: "How to Add a Callout Note Comment in Your PDF Documents in Foxit PDF
+  Editor" — demonstrates callout note comments in Foxit PDF Editor.
+- YouTube: "How I Use Adobe Acrobat to Annotate PDFs" — covers Adobe Acrobat
+  annotation, font-size adjustment, commenting and highlighting.
+- YouTube: "PDF Annotation" — discusses visible annotation/citation inside the text
+  rather than forcing separate cross-reference documents.
+- Adobe Acrobat help: callouts have a text box, knee line and endpoint line; text
+  wraps at the box edge; resize/move the text box and endpoint as needed.
+- Bluebeam support: callouts place a leader line connected to a text box; the leader
+  terminus and text box can be moved independently; autosize text boxes; move or
+  remove leader lines; configure colour, fill opacity, line width, font and margins.
+- Foxit annotation material: callouts create a text box and arrow to single out a
+  particular area; text boxes are visible on the page and may have optional borders.
+
+================================================================================
+YT1. STRICT CALLOUT RULES FROM TUTORIALS
+================================================================================
+
+YT1.1 A callout is only valid if all three parts are controlled:
+- exact endpoint on the tested value;
+- leader line that does not cross unrelated document text/values;
+- text box placed in safe whitespace and large enough for its content.
+
+YT1.2 A callout is invalid if:
+- its endpoint points vaguely to a row rather than the exact tested value;
+- its leader line crosses unrelated numbers;
+- its leader line crosses original text;
+- its text box overlaps original text;
+- its text box overlaps another annotation;
+- its text is clipped, overflowed, or too small;
+- it needs a legend to be understood;
+- it lacks page + value + result.
+
+YT1.3 Use fewer callouts than values when the page is crowded:
+- mark only the most important total, mismatch, partial support or unsupported value;
+- do not mark every repeated transaction line if a clear total exists;
+- do not duplicate labels on the same page if one clear label covers the point.
+
+YT1.4 If a callout cannot be placed safely:
+Use only:
+- red underline under exact value;
+- optional transparent red highlight over exact value only;
+- a very short label in nearest whitespace;
+- PDF comment metadata for details.
+
+Do not force a callout onto a crowded page.
+
+YT1.5 If there is no clean leader path:
+- remove the leader line;
+- place the label next to the value if possible;
+- use underline + comment metadata;
+- do not draw a diagonal line across a table.
+
+YT1.6 If a label is too long:
+- shorten it;
+- split into two lines only if both lines fit;
+- use "A page 5 $29,840.00 agrees with B page 6 $29,840.00";
+- do not use paragraphs inside the PDF;
+- do not shrink text below readability just to make it fit.
+
+================================================================================
+M0. SUMMARY OF PAST MISTAKES THAT MUST NEVER REPEAT
+================================================================================
+
+M0.1 Assumption mistakes
+- Assumed a made-up cross-reference code "XR" was acceptable.
+- Assumed a margin system would help when the user did not request added margins.
+- Assumed a matrix/extra page would help when the user did not request added pages.
+- Assumed colour-coding systems would help when the user wanted strict conformity.
+- Assumed symbols like "!=" were acceptable for pension-age/non-technical readers.
+- Assumed identity fields were equally important as values when the task was mainly
+  currency/value cross-referencing.
+- Assumed partial evidence could be presented too close to full agreement.
+- Assumed a visually busy page was acceptable because the content was "technically"
+  cross-referenced.
+- Assumed OCR/text extraction was enough for a visual PDF task.
+- Assumed the file was acceptable without full visual QA at page level.
+
+Strict rule:
+Do not assume. Read the page, identify the value, find the supporting page, classify
+the relationship, then annotate only if the annotation improves readability.
+
+M0.2 Research mistakes
+- Did not research visual workpaper/callout conventions before first annotation pass.
+- Did not clearly separate law/standards from operational PDF design.
+- Did not treat the uploaded AGLC as citation guidance rather than legislation.
+- Did not research enough Australian legal hooks before building the standard.
+- Did not research PDF callout mechanics enough before using arrows/callouts.
+
+Strict rule:
+Before annotating:
+1. Check the formal legal/audit standard.
+2. Check the PDF markup rules.
+3. Check whether each annotation is mandated, official guidance, or operational
+   implication.
+4. Never present operational design as law.
+
+M0.3 Label mistakes
+- Used "XR" instead of page + value references.
+- Used shorthand where plain English was required.
+- Used symbols instead of words.
+- Used labels that were too long.
+- Used labels that lacked either page number or exact value.
+- Used labels that did not clearly state agreement, mismatch, partial support or no
+  direct support.
+
+Strict rule:
+Every visible label must use:
+    [Pack] page [number] [value] [result in words] [Pack] page [number] [value]
+
+Approved result words:
+- agrees with
+- does not agree with
+- partly supported by
+- has no direct support found in
+- not enough information to conclude
+
+Banned visible result codes:
+- XR
+- REF
+- OK
+- MATCHED
+- TBC
+- !=
+- =
+- tick-only symbols
+- colour-only status
+
+M0.4 Visual mistakes
+- Lines were too cluttered.
+- Arrows overlapped each other.
+- Arrows crossed document text.
+- Text boxes overlapped document text.
+- Text boxes overflowed.
+- Boxes had fill that covered evidence.
+- Highlights covered too much area.
+- Labels were too close to tables and values.
+- Margins were bad.
+- Styling was inconsistent and not auditor-friendly.
+- Annotations made pages harder to read.
+
+Strict rule:
+An annotation fails if it makes the page harder to read.
+
+M0.5 SMSF-format mistakes
+- Did not consistently follow internal value -> external evidence -> page/value/result.
+- Did not focus first on material money values.
+- Did not always reference both pages and both values.
+- Did not consistently identify fund/FY first.
+- Did not clearly separate "agrees" from "partial support" or "no direct support".
+- Did not treat valuation/ownership/LRBA/bank/contribution/pension values as risk-led
+  priorities.
+
+Strict rule:
+SMSF cross-reference format is evidence-chain format:
+    Internal workpaper value
+    -> external evidence value
+    -> page and value on both sides
+    -> result in words
+    -> no obscuring of evidence
+
+================================================================================
+M1. STRICT ANTI-ASSUMPTION RULES
+================================================================================
+
+M1.1 Never assume document identity.
+Before annotating values, identify:
+- fund name;
+- trustee name if shown;
+- FY/year ended;
+- pack name;
+- source page proving those facts.
+
+M1.2 Never assume FY from file name.
+The FY must appear on a page or be marked "not found" if relevant.
+
+M1.3 Never assume two values match because they are similar.
+Compare exact amounts, dates, member names, account suffixes, source type, gross/net
+basis and period.
+
+M1.4 Never assume partial support is full support.
+If only interest is shown for a term deposit principal, label it:
+    partly supported by interest evidence only
+or:
+    has no direct support found
+
+M1.5 Never assume a transaction belongs to the fund if the page only shows a member name.
+Check fund/account identifiers where available.
+
+M1.6 Never assume a bank feed replaces bank statement evidence.
+Use the visible external evidence actually present in the pack.
+
+M1.7 Never assume a market value is supported just because a product code matches.
+Check value, price date and source page.
+
+M1.8 Never assume one annotation system suits every page.
+Crowded pages need fewer labels, shorter labels, and often no leader lines.
+
+M1.9 Never assume more annotations means better cross-referencing.
+Over-annotation is a quality failure.
+
+M1.10 Never assume a generated PDF is acceptable.
+Always re-render and visually inspect every annotated page.
+
+================================================================================
+M2. STRICT PAGE AND VALUE REFERENCE RULES
+================================================================================
+
+M2.1 Every visible reference must include:
+- source pack;
+- source page;
+- source exact amount/value;
+- result in words;
+- evidence pack;
+- evidence page;
+- evidence exact amount/value if available.
+
+M2.2 Minimum acceptable labels:
+- A page 5 $29,840.00 agrees with B page 6 $29,840.00
+- A page 5 $15,516.80 does not agree with B page 6 $15,077.45
+- A page 8 $150,000.00 partly supported by B page 7 interest evidence only
+- A page 8 $150,000.00 has no direct support found in B
+- A page 7 $29,400.00 agrees with B pages 6-9 pension payments
+
+M2.3 Labels must use words, not symbolic equality, unless the user explicitly requests
+symbols.
+
+M2.4 Page references must use PDF page numbers unless the user requests printed page
+numbers.
+
+M2.5 If PDF and printed page numbers differ and both matter:
+    A PDF page 5 / printed page 3 $29,840.00 agrees with B PDF page 6 $29,840.00
+
+================================================================================
+M3. STRICT VISUAL PLACEMENT RULES
+================================================================================
+
+M3.1 Priority visual treatment:
+1. Underline exact value.
+2. Transparent highlight exact value only.
+3. Use a no-fill box only for mismatch, partial support, no support or high-risk item.
+4. Use a short label in whitespace.
+5. Use a leader line only if it does not cross source text or other annotations.
+
+M3.2 No-fill box rule:
+- Fill opacity must be zero.
+- If fill cannot be set to zero, do not use a box.
+- Never use an opaque rectangle over evidence.
+
+M3.3 Highlight rule:
+- Highlight exact numbers only.
+- Do not highlight whole tables.
+- Do not highlight paragraph blocks.
+- Do not highlight rows unless the entire row is the tested item and there is no safer
+  alternative.
+
+M3.4 Leader/arrow rule:
+- Use the shortest possible leader.
+- Do not cross unrelated values.
+- Do not cross source text.
+- Do not cross another leader line.
+- Do not use diagonal leaders through table bodies.
+- If no clean path exists, remove the leader.
+
+M3.5 Label rule:
+- Label must fit inside its box.
+- Label must not overlap document text.
+- Label must not overlap other annotations.
+- Label must not cover values.
+- Label must be readable at normal zoom.
+- If label cannot fit, shorten it or move detail to comment metadata.
+
+M3.6 Gutter/whitespace rule:
+- Use existing whitespace.
+- Do not add margins unless explicitly requested.
+- Do not add pages unless explicitly requested.
+- Do not place text in margins if it creates bad styling or weak readability.
+
+M3.7 Density rule:
+Maximum visible callouts per crowded page should be low.
+Prefer:
+- one total callout;
+- one mismatch callout;
+- one unsupported/partial support callout;
+not 10+ callouts with crossing arrows.
+
+M3.8 Duplicate-reference rule:
+Do not duplicate the same relationship repeatedly on the same page unless it materially
+helps understanding.
+
+================================================================================
+M4. STRICT QA RULES
+================================================================================
+
+Before delivery, every annotated page must pass:
+
+1. Source values remain fully readable.
+2. No box fill covers any source content.
+3. No text box overflows.
+4. No annotation text overlaps original document text.
+5. No annotation text overlaps another annotation.
+6. No arrows/leader lines cross source values.
+7. No arrows/leader lines cross each other.
+8. Every label has page + value + result.
+9. Fund/FY was checked before value annotation.
+10. Page count unchanged unless user requested added pages.
+11. Page dimensions unchanged unless user requested resizing.
+12. All annotations improve readability rather than merely increasing markup.
+13. The file is re-rendered after saving and visually inspected.
+14. Any uncertain evidence is labelled uncertain/partial/no direct support, not "agrees".
+15. The final response does not overclaim.
+
+If any one of these fails, revise before delivery.
+
+================================================================================
+M5. STRICT DELIVERY RULES
+================================================================================
+
+M5.1 Do not say "completed" unless:
+- the final file was actually created;
+- it was visually rendered after creation;
+- obvious overlap/clutter was inspected;
+- the download link points to the latest corrected file.
+
+M5.2 Do not claim legal compliance.
+Say:
+- "built against the compiled standard"
+- "cross-referenced using page/value evidence logic"
+- "visually QA-rendered"
+Do not say:
+- "legally compliant"
+- "cannot be flawed"
+- "guaranteed correct"
+
+M5.3 If a source PDF or uploaded standard is inaccessible, say so immediately.
+Do not fabricate a result.
+
+M5.4 If the instruction conflicts with the standard:
+- obey the user’s explicit visual constraint where safe;
+- preserve audit readability and source evidence;
+- do not obscure the record.
+
+================================================================================
+M6. FINAL AI COMMANDMENT
+================================================================================
+
+The model must treat every annotation as a professional audit workpaper mark.
+
+A mark is acceptable only when it:
+- identifies the exact tested value;
+- identifies the exact page;
+- states the result in plain words;
+- points to evidence without clutter;
+- does not hide or distort the record;
+- is understandable without decoding a legend;
+- survives visual QA.
+
+If it does not satisfy those conditions, do not place the mark.
+
+================================================================================
+ADDITIONAL SOURCES FOR THIS SECTION
+================================================================================
+
+187. YouTube - How to Create Callout in Bluebeam 2026 (Simple Step), TUTOR BASE, published 2026-02-03.
+     https://www.youtube.com/watch?v=x5qzR80HwM0
+
+188. YouTube - How to Add a Callout Note Comment in Your PDF Documents in Foxit PDF Editor, PDF Editor, published 2025-04-23.
+     https://www.youtube.com/watch?v=zWYT9dLf88E
+
+189. YouTube - How I Use Adobe Acrobat to Annotate PDFs, How I Write and Learn, published 2021-05-07.
+     https://www.youtube.com/watch?v=zHw_IrW-Cjc
+
+190. YouTube - PDF Annotation, Surface Scholar, published 2016-11-23.
+     https://www.youtube.com/watch?v=WwmhanmfUZE
+
+191. Adobe Acrobat Help - Add comments in callouts. Explains text box, knee line and endpoint line; resizing/moving text box and endpoint.
+     https://helpx.adobe.com/acrobat/desktop/share-and-review-documents/review-documents/add-callouts.html
+
+192. Adobe Acrobat Help - Use annotation and drawing markup tools to add comments in PDFs.
+     https://helpx.adobe.com/acrobat/using/commenting-pdfs.html
+
+193. Adobe Acrobat Help - Mark up text with edits. Explains highlight, strikethrough, underline and comment tools.
+     https://helpx.adobe.com/acrobat/using/mark-text-edits.html
+
+194. Adobe Acrobat - Annotate and markup PDFs. Lists text boxes, sticky notes, shapes, drawings, highlights, underlines and strikethroughs.
+     https://www.adobe.com/acrobat/how-to/annotate-pdf-online.html
+
+195. Bluebeam Technical Support - Callout Tool. Explains leader line, text box, endpoint/terminus, moving leader/text box, autosizing text.
+     https://support.bluebeam.com/online-help/revu21/Content/RevuHelp/Menus/Tools/Markup/Callout-Tool--MTV.htm
+
+196. Bluebeam Technical Support - Revu tips and tricks. Includes autosize text box, draw/move markups orthogonally and markup editing.
+     https://support.bluebeam.com/articles/bluebeam-revu-subscription-tips-tricks/
+
+197. Bluebeam Technical Support - Cloud+ Tool. Explains combined cloud and callout markup and using Shift to control straight lines/angles.
+     https://support.bluebeam.com/online-help/revu21/Content/RevuHelp/Menus/Tools/Markup/CloudPlus-Tool--MTV.htm
+
+198. Foxit - Why PDF annotations are the best way to share comments on your documents. Explains callout text box and arrow to single out areas.
+     https://www.foxit.com/blog/why-pdf-annotations-are-the-best-way-to-share-comments-on-your-documents/
+
+199. Nitro User Guide - Text boxes and callouts.
+     https://www.gonitro.com/user-guide/pro/article/text-boxes-and-call-outs
+
+200. Nitro User Guide - Highlighting, underline, strikethrough and squiggle.
+     https://www.gonitro.com/user-guide/mac/article/highlighting-underline-strikethrough-and-squiggle
+
+================================================================================
+END STRICT FAILURE RULES + YOUTUBE / TUTORIAL MARKUP LESSONS
+================================================================================
