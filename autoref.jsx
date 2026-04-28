@@ -761,6 +761,8 @@ function Auto() {
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
   const lastUserQueryRef = useRef(""); // tracks last user query for smart document chunking
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [exportedArtifacts, setExportedArtifacts] = useState([]); // [{id, name, blobUrl, size, timestamp}]
 
   // Load on mount — always target the lightest default model first
   useEffect(() => {
@@ -837,6 +839,13 @@ function Auto() {
     prevBlobUrlsRef.current = currentUrls;
     return () => { currentUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch {} }); };
   }, [pdfDocs]);
+
+  // Cleanup exported artifact blob URLs on unmount
+  useEffect(() => {
+    return () => {
+      exportedArtifacts.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+    };
+  }, [exportedArtifacts]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -1268,6 +1277,16 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 
       s += `\n\n<documents>\nThe following documents have been uploaded for cross-referencing. ALWAYS cite these by name and page number.\n`;
       for (const doc of pdfDocs) {
+        // Detect scanned/image-based PDFs: text is empty or only contains scanned-page markers
+        const textWithoutMarkers = doc.text.replace(/=== \[Page \d+\] ===/g, "").replace(/\(Scanned\/handwritten page[^)]*\)/g, "").replace(/\(Could not render[^)]*\)/g, "").replace(/\(Scanned page[^)]*\)/g, "").trim();
+        const isScannedDoc = doc.pageCount > 0 && textWithoutMarkers.length < 100;
+        if (isScannedDoc) {
+          s += `\n<document name="${doc.name}" pages="${doc.pageCount}" status="scanned-image-pdf">\n`;
+          s += `[SCANNED DOCUMENT — "${doc.name}" is an image-based/scanned PDF with ${doc.pageCount} page(s). Text extraction was not possible because this PDF contains scanned images rather than selectable text.]\n`;
+          s += `[ACTION REQUIRED: You MUST clearly tell the user: "I can see that '${doc.name}' was uploaded but it appears to be a scanned/image-based PDF — I cannot read its text content. To cross-reference it, please: (1) Use an OCR tool (e.g. Adobe Acrobat, Google Drive, or online OCR) to convert the scanned PDF to a text-based PDF, then re-upload it, or (2) Copy and paste the text content directly into the chat. In the meantime, I can provide general SMSF guidance based on typical document content for this type of document."]\n`;
+          s += `</document>\n`;
+          continue;
+        }
         const docTokens = estimateTokens(doc.text);
         if (docTokens <= perDocBudget) {
           // Fits entirely — include full text for maximum accuracy
@@ -1844,18 +1863,19 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
       // ─── Finalise: parse response and update state ───
       const { text, actions } = parseResponse(finalRaw);
 
+      // Fallback display text: if parseResponse stripped everything, recover from raw
+      const displayText = text || finalRaw.replace(/<memory_update>[\s\S]*?<\/memory_update>/gi, "").replace(/<[a-z_]+>[\s\S]*?<\/[a-z_]+>/g, "").trim() || checkpointRaw || "Analysis complete.";
+
       if (actions.memoryUpdate) {
         setMem(actions.memoryUpdate);
         setMemDraft(actions.memoryUpdate);
         saveVal(MEMORY_STORAGE_KEY, actions.memoryUpdate);
-        if (text) {
-          currentMsgs = [...currentMsgs, { role: "assistant", content: text + `\n\n---\n*Memory updated and saved to memory.txt*`, _id: nextMsgId() }];
-        }
-      } else if (text) {
-        currentMsgs = [...currentMsgs, { role: "assistant", content: text, _id: nextMsgId() }];
+        currentMsgs = [...currentMsgs, { role: "assistant", content: displayText + `\n\n---\n*Memory updated and saved to memory.txt*`, _id: nextMsgId() }];
+      } else {
+        currentMsgs = [...currentMsgs, { role: "assistant", content: displayText, _id: nextMsgId() }];
         const autoMemory = mem.trim()
-          ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`
-          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${text.slice(0, 200)}`;
+          ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`
+          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`;
         setMem(autoMemory);
         setMemDraft(autoMemory);
         saveVal(MEMORY_STORAGE_KEY, autoMemory);
@@ -1981,6 +2001,12 @@ ${chatHtml}
       a.click();
     }
     URL.revokeObjectURL(url);
+
+    // Register a separate artifact entry for the Artifacts panel (keep its own URL)
+    const artifactBlob = new Blob([html], { type: "text/html" });
+    const artifactUrl = URL.createObjectURL(artifactBlob);
+    const artifactName = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
+    setExportedArtifacts(prev => [...prev, { id: "export-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
   }, [msgs, pdfDocs, localModelId]);
 
   // ═══ RENDER ═══
@@ -2032,6 +2058,126 @@ ${chatHtml}
           </div>
         </div>
       )}
+      {/* ═══ ARTIFACTS PANEL ═══ */}
+      {artifactsOpen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 3000, background: "rgba(0,0,0,0.7)", display: "flex", justifyContent: "flex-end", animation: "fadeIn .15s ease" }} onClick={e => { if (e.target === e.currentTarget) setArtifactsOpen(false); }}>
+          <div style={{ width: "min(420px,95vw)", height: "100%", background: "#0d0d14", borderLeft: "1px solid var(--bd)", display: "flex", flexDirection: "column", animation: "slideL .2s ease" }}>
+            {/* Header */}
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--bd)", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "14px" }}>📎</span>
+                <span style={{ fontWeight: 700, fontSize: "14px", color: "var(--ac2)" }}>Artifacts</span>
+                <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", padding: "1px 6px", borderRadius: "3px", background: "rgba(255,255,255,0.03)", border: "1px solid var(--bd)" }}>
+                  {pdfDocs.length + exportedArtifacts.length} item{pdfDocs.length + exportedArtifacts.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <button onClick={() => setArtifactsOpen(false)} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px", lineHeight: 1 }}>×</button>
+            </div>
+
+            {/* Content */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }}>
+              {pdfDocs.length === 0 && exportedArtifacts.length === 0 && pdfLoading.length === 0 && (
+                <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--dm)", fontSize: "12px", lineHeight: 1.8 }}>
+                  <div style={{ fontSize: "28px", marginBottom: "10px", opacity: 0.4 }}>📁</div>
+                  <div>No artifacts yet.</div>
+                  <div style={{ fontSize: "11px", marginTop: "6px" }}>Upload SMSF documents using the <strong style={{ color: "var(--tx)" }}>+</strong> button, or export an analysis to see files here.</div>
+                </div>
+              )}
+
+              {/* PDFs being extracted */}
+              {pdfLoading.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Extracting…</div>
+                  {pdfLoading.map((pl, i) => (
+                    <div key={"al-" + i} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", borderRadius: "6px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.18)", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "18px", animation: "pulse 1.5s infinite" }}>📄</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "11px", color: "#cc9955", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)" }}>{pl.name}</div>
+                        <div style={{ fontSize: "9px", color: "var(--dm)", marginTop: "2px" }}>{pl.total > 0 ? `${pl.progress}/${pl.total} pages` : "reading…"}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Uploaded PDFs */}
+              {pdfDocs.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Uploaded Documents</div>
+                  {pdfDocs.map((doc, i) => {
+                    const isScanned = doc.pageCount > 0 && !doc.text.replace(/=== \[Page \d+\] ===/g, "").replace(/\(Scanned[^)]*\)/g, "").replace(/\(Could not[^)]*\)/g, "").trim().length;
+                    return (
+                      <div key={i} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.12)", marginBottom: "6px" }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                          <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>📄</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: "12px", color: "var(--ac2)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={doc.name}>{doc.name}</div>
+                            <div style={{ fontSize: "10px", color: "var(--dm)", marginTop: "2px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                              <span>{doc.pageCount} pages</span>
+                              <span>~{(doc.text.length / 1024).toFixed(0)} KB text</span>
+                              {isScanned && <span style={{ color: "#cc9955" }}>⚠ scanned</span>}
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
+                          <button onClick={() => { setPdfViewerIdx(i); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
+                          <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
+                          {doc.blobUrl && (
+                            <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
+                          )}
+                          <button onClick={() => {
+                            setPdfDocs(prev => prev.filter((_, j) => j !== i));
+                            setAttachments(prev => prev.filter(a => a.name !== doc.name));
+                          }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
+                        </div>
+                        {isScanned && (
+                          <div style={{ marginTop: "6px", fontSize: "9px", color: "#cc9955", lineHeight: 1.5, padding: "4px 6px", background: "rgba(204,153,85,0.06)", borderRadius: "4px", border: "1px solid rgba(204,153,85,0.15)" }}>
+                            Scanned/image-based PDF — text not extractable. AI will acknowledge this and provide general SMSF guidance.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Exported Reports */}
+              {exportedArtifacts.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Exported Reports</div>
+                  {exportedArtifacts.map((a) => (
+                    <div key={a.id} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(124,224,138,0.04)", border: "1px solid rgba(124,224,138,0.12)", marginBottom: "6px" }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>📊</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "12px", color: "var(--ac)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.name}>{a.name}</div>
+                          <div style={{ fontSize: "10px", color: "var(--dm)", marginTop: "2px" }}>
+                            {(a.size / 1024).toFixed(1)} KB · {a.timestamp.toLocaleString()}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: "4px", marginTop: "8px" }}>
+                        <a href={a.blobUrl} target="_blank" rel="noreferrer" style={{ ...btn("#88bbcc"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Open</a>
+                        <a href={a.blobUrl} download={a.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
+                        <button onClick={() => {
+                          try { URL.revokeObjectURL(a.blobUrl); } catch {}
+                          setExportedArtifacts(prev => prev.filter(x => x.id !== a.id));
+                        }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: "8px 14px", borderTop: "1px solid var(--bd)", fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", flexShrink: 0 }}>
+              Artifacts are local to this session — reload clears uploaded files.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══ LEFT SIDEBAR ═══ */}
       {sidebarOpen && (
         <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--bd)", background: "var(--sf)", overflow: "hidden", animation: "slideR .2s ease" }}>
@@ -2289,6 +2435,17 @@ ${chatHtml}
             >
               <span style={{ fontSize: "13px" }}>🧠</span>
               <span style={{ fontSize: "10px", fontFamily: "var(--m)" }}>Workspace</span>
+            </button>
+            <button
+              onClick={() => setArtifactsOpen(!artifactsOpen)}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "4px", color: artifactsOpen ? "var(--ac2)" : (pdfDocs.length + exportedArtifacts.length > 0 ? "var(--tx)" : "var(--dm)"), borderColor: artifactsOpen ? "rgba(136,187,204,0.2)" : (pdfDocs.length + exportedArtifacts.length > 0 ? "rgba(255,255,255,0.1)" : undefined), background: artifactsOpen ? "rgba(136,187,204,0.08)" : undefined }}
+              title="View and manage uploaded documents and exported reports"
+            >
+              <span style={{ fontSize: "12px" }}>📎</span>
+              <span>Artifacts</span>
+              {(pdfDocs.length + exportedArtifacts.length) > 0 && (
+                <span style={{ fontSize: "9px", padding: "0px 4px", borderRadius: "3px", background: "rgba(136,187,204,0.15)", color: "var(--ac2)", fontWeight: 700 }}>{pdfDocs.length + exportedArtifacts.length}</span>
+              )}
             </button>
             <button
               onClick={exportAnalysisPdf}
