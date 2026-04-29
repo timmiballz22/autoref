@@ -268,6 +268,26 @@ function getRuntimeProfile(modelId) {
   };
 }
 
+function buildAttachmentContext(msgs, pdfDocs) {
+  const latestUser = [...(Array.isArray(msgs) ? msgs : [])].reverse().find(m => m?.role === "user");
+  const atts = Array.isArray(latestUser?.attachmentsMeta) ? latestUser.attachmentsMeta : [];
+  if (atts.length === 0) return "";
+  const knownPdfNames = new Set((Array.isArray(pdfDocs) ? pdfDocs : []).map(d => d.name));
+  const lines = atts.map(a => {
+    const pg = Number(a.pageCount || 0);
+    const status = a.isPdf ? (knownPdfNames.has(a.name) ? "extracted-and-available" : "uploaded-pdf") : (a.isImage ? "uploaded-image" : "uploaded-file");
+    return `- ${a.name} (${status}${pg > 0 ? `, ${pg} pages` : ""})`;
+  });
+  return (
+    `<attached_artifacts>\n` +
+    `The user has already uploaded these artifacts in this chat session (no URL is required):\n` +
+    `${lines.join("\n")}\n` +
+    `When the user asks to analyze/cross-reference them, proceed directly using available extracted content.\n` +
+    `Do NOT ask for links/URLs unless the file is explicitly missing.\n` +
+    `</attached_artifacts>`
+  );
+}
+
 // Translate WebLLM/WASM errors into actionable messages
 function describeLoadError(e) {
   const msg = (e && e.message) || String(e || "");
@@ -2593,6 +2613,8 @@ Rules:
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
+      const artifactContext = buildAttachmentContext(currentMsgs, pdfDocs);
+      if (artifactContext) mainSystem += `\n\n${artifactContext}`;
       if (reviewerFindings.length > 0) {
         mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
         for (const { question, findings } of reviewerFindings) {
