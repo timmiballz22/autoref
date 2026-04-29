@@ -2790,7 +2790,29 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     }
   }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
 
-  const clearChat = () => { setMsgs([]); saveChat([]); setErr(null); };
+  const clearChat = async () => {
+    try { abortRef.current?.abort?.(); } catch {}
+    setMsgs([]);
+    setInput("");
+    setAttachments([]);
+    setStreamingText("");
+    setActivityStatus("");
+    setErr(null);
+    setUsage({ i: 0, o: 0 });
+    setCrossRefs([]);
+    setCrossRefPanelOpen(false);
+    setPdfDocs([]);
+    setPdfLoading([]);
+    setDocTextViewerOpen(false);
+    setPdfViewerOpen(false);
+    setArtifactsOpen(false);
+    setExportedArtifacts([]);
+    setMem("");
+    setMemDraft("");
+    try { await saveChat([]); } catch {}
+    try { await clearVal(CHAT_STORAGE_KEY); } catch {}
+    try { await clearVal(MEMORY_STORAGE_KEY); } catch {}
+  };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ─── Navigate to a cross-reference: open PDF viewer, jump to page, show highlights ───
