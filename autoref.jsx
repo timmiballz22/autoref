@@ -2433,7 +2433,25 @@ Even for simple greetings, update memory with at least the conversation timestam
         } else {
           const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
           attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
+          if (att.isPdf) {
+            const scannedPages = (att.content.match(/\(Scanned\/handwritten page/g) || []).length;
+            if (scannedPages > 0) {
+              attachBlock += `\n[Artifact note] ${att.name} appears to be scanned/image-based (${scannedPages} scanned page marker${scannedPages > 1 ? "s" : ""}). `;
+              attachBlock += `I should still cross-reference what is available, clearly flag OCR limitations, and ask targeted questions instead of asking you to re-send files.\n`;
+            }
+            const inlinePages = Array.isArray(att.pageImages) ? att.pageImages.slice(0, 2) : [];
+            if (inlinePages.length > 0) {
+              attachBlock += `\n[Artifact preview: first ${inlinePages.length} scanned page image${inlinePages.length > 1 ? "s" : ""}]\n`;
+              for (const p of inlinePages) {
+                attachBlock += `![${att.name} page ${p.page}](${p.dataUrl})\n`;
+              }
+            }
+          }
         }
+      }
+      if (pdfDocs.length > 0) {
+        attachBlock += `\n\n[Cross-reference directive] Use ALL uploaded documents together.`;
+        attachBlock += ` Do not ask for "specific sections" first. Start with a whole-document pass and explicitly list mismatches, missing evidence, and follow-up questions.\n`;
       }
       userContent = (txt || "Here are my attached files:") + attachBlock;
     }
