@@ -3065,6 +3065,19 @@ ${chatHtml}
     setExportedArtifacts(prev => [...prev, { id: "export-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
   }, [msgs, pdfDocs, localModelId]);
 
+  const regeneratePdfArtifact = useCallback((doc) => {
+    if (!doc) return;
+    const safeName = String(doc.name || "document.pdf").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const body = String(doc.text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${safeName} - Regenerated Artifact</title>
+<style>body{font-family:system-ui,sans-serif;margin:18px;line-height:1.5} .meta{font-size:12px;color:#666;margin-bottom:10px;border-bottom:1px solid #ddd;padding-bottom:8px}</style>
+</head><body><h2>${safeName} — Regenerated Artifact</h2><div class="meta">Pages: ${doc.pageCount || 0} · Generated: ${new Date().toLocaleString()}</div><div>${body}</div></body></html>`;
+    const artifactBlob = new Blob([html], { type: "text/html" });
+    const artifactUrl = URL.createObjectURL(artifactBlob);
+    const artifactName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.html";
+    setExportedArtifacts(prev => [...prev, { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
+  }, []);
+
   // ═══ RENDER ═══
   const S = {
     "--f": "'Nunito Sans', system-ui, sans-serif",
@@ -3188,6 +3201,7 @@ ${chatHtml}
                         <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
                           <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
+                          <button onClick={() => regeneratePdfArtifact(doc)} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate Artifact</button>
                           {doc.blobUrl && (
                             <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
                           )}
@@ -3528,6 +3542,17 @@ ${chatHtml}
                 <span style={{ fontSize: "9px", padding: "0px 4px", borderRadius: "3px", background: "rgba(136,187,204,0.15)", color: "var(--ac2)", fontWeight: 700 }}>{pdfDocs.length + exportedArtifacts.length}</span>
               )}
             </button>
+            <button
+              onClick={() => {
+                if (pdfDocs.length > 0) {
+                  setDocTextViewerIdx(0);
+                  setDocTextViewerOpen(true);
+                  setArtifactsOpen(true);
+                }
+              }}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: pdfDocs.length > 0 ? "var(--ac2)" : "var(--dm)", opacity: pdfDocs.length > 0 ? 1 : 0.6 }}
+              title="Open PDF text editor/viewer tool"
+            >PDF Editor</button>
             {pdfDocs.length >= 2 && (
               <button
                 onClick={() => setCrossRefPanelOpen(v => !v)}
