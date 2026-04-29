@@ -13,10 +13,35 @@ window.addEventListener("error", (event) => {
 
 // ─── WebLLM module cache (imported once, reused) ───
 let _webllmModule = null;
+let _sharedEngine = null;
+let _sharedEngineModelId = null;
+let _sharedEngineInitPromise = null;
 async function getWebLLM() {
   if (_webllmModule) return _webllmModule;
   _webllmModule = await import("https://esm.run/@mlc-ai/web-llm");
   return _webllmModule;
+}
+
+async function getOrCreateSharedEngine(modelId, createFn) {
+  if (_sharedEngine && _sharedEngineModelId === modelId) return _sharedEngine;
+  if (_sharedEngineInitPromise && _sharedEngineModelId === modelId) return _sharedEngineInitPromise;
+  _sharedEngineModelId = modelId;
+  _sharedEngineInitPromise = (async () => {
+    _sharedEngine = await createFn();
+    return _sharedEngine;
+  })();
+  try {
+    return await _sharedEngineInitPromise;
+  } finally {
+    _sharedEngineInitPromise = null;
+  }
+}
+
+async function clearSharedEngine() {
+  try { await _sharedEngine?.unload?.(); } catch {}
+  _sharedEngine = null;
+  _sharedEngineModelId = null;
+  _sharedEngineInitPromise = null;
 }
 
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
@@ -1244,7 +1269,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             },
           };
           if (engineCfg) engineOpts.appConfig = engineCfg;
-          const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
+          const engine = await getOrCreateSharedEngine(
+            localModelId,
+            () => webllm.CreateMLCEngine(localModelId, engineOpts),
+          );
           localEngineRef.current = engine;
           setLocalModelStatus("ready");
           setUseLocalModel(true);
@@ -1393,8 +1421,15 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     setLocalModelProgress(0);
     setLocalModelProgressText("Fetching WebLLM engine...");
     try {
-      // Release any prior engine's GPU resources before allocating a new one
-      try { await localEngineRef.current?.unload?.(); } catch {}
+      // Reuse loaded engine for the same model across interactions/sessions.
+      if (localEngineRef.current && _sharedEngineModelId === localModelId) {
+        setLocalModelStatus("ready");
+        setUseLocalModel(true);
+        setLocalModelProgress(100);
+        setLocalModelProgressText("Model already loaded in memory.");
+        return;
+      }
+      await clearSharedEngine();
       localEngineRef.current = null;
       const webllm = await getWebLLM();
       const engineCfg = buildEngineConfig(webllm, localModelId);
@@ -1405,7 +1440,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         },
       };
       if (engineCfg) engineOpts.appConfig = engineCfg;
-      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
+      const engine = await getOrCreateSharedEngine(
+        localModelId,
+        () => webllm.CreateMLCEngine(localModelId, engineOpts),
+      );
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
@@ -1427,7 +1465,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     setLocalModelProgress(0);
     setLocalModelProgressText("Loading from cache...");
     try {
-      try { await localEngineRef.current?.unload?.(); } catch {}
+      if (localEngineRef.current && _sharedEngineModelId === localModelId) {
+        setLocalModelStatus("ready");
+        setUseLocalModel(true);
+        setLocalModelProgress(100);
+        setLocalModelProgressText("Loaded instantly from in-memory engine.");
+        return;
+      }
+      await clearSharedEngine();
       localEngineRef.current = null;
       const webllm = await getWebLLM();
       const engineCfg = buildEngineConfig(webllm, localModelId);
@@ -1438,7 +1483,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         },
       };
       if (engineCfg) engineOpts.appConfig = engineCfg;
-      const engine = await webllm.CreateMLCEngine(localModelId, engineOpts);
+      const engine = await getOrCreateSharedEngine(
+        localModelId,
+        () => webllm.CreateMLCEngine(localModelId, engineOpts),
+      );
       localEngineRef.current = engine;
       setLocalModelStatus("ready");
       setUseLocalModel(true);
@@ -1464,7 +1512,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     if (!window.confirm(`Delete cached model "${localModelId}"? You will need to re-download it to use it again.`)) return;
     try {
       // Release GPU resources before clearing the cache
-      try { await localEngineRef.current?.unload?.(); } catch {}
+      await clearSharedEngine();
       localEngineRef.current = null;
       setUseLocalModel(false);
       // Remove from all caches
@@ -2975,7 +3023,7 @@ ${chatHtml}
                     onClick={async () => {
                       if (locked) return;
                       // Unload current engine — release GPU resources, not just clear ref
-                      try { await localEngineRef.current?.unload?.(); } catch {}
+                      await clearSharedEngine();
                       localEngineRef.current = null;
                       autoLoadAttemptedRef.current = false;
                       setUseLocalModel(false);
