@@ -254,6 +254,20 @@ function isRuntimeLowMemory() {
   );
 }
 
+function getRuntimeProfile(modelId) {
+  const lowMemory = isRuntimeLowMemory();
+  const contextLimit = getRuntimeContextLimit(modelId);
+  const isSmallModel = contextLimit <= 32768;
+  return {
+    lowMemory,
+    contextLimit,
+    isSmallModel,
+    maxMsgs: lowMemory ? 6 : isSmallModel ? 8 : 16,
+    streamIntervalMs: lowMemory ? 260 : 180,
+    planningEnabled: !lowMemory && !isSmallModel,
+  };
+}
+
 // Translate WebLLM/WASM errors into actionable messages
 function describeLoadError(e) {
   const msg = (e && e.message) || String(e || "");
@@ -1941,7 +1955,8 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
       }
       s += `</documents>`;
       // Inject auto-detected cross-reference index (only for larger models — keeps Qwen prompt tight)
-      const isSmallModel = getRuntimeContextLimit(localModelId) <= 32768;
+      const runtimeProfile = getRuntimeProfile(localModelId);
+      const isSmallModel = runtimeProfile.isSmallModel;
       if (!isSmallModel && crossRefs.length > 0) s += formatCrossRefsForAI(crossRefs);
     }
 
@@ -1973,9 +1988,8 @@ Even for simple greetings, update memory with at least the conversation timestam
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
     // Larger models: 50% cap — leaves room for chat history + generation
-    const runtimeCtxCap = getRuntimeContextLimit(localModelId);
-    const isSmallCap = runtimeCtxCap <= 32768;
-    const maxSystemTokens = Math.floor(runtimeCtxCap * (isSmallCap ? 0.35 : 0.50));
+    const runtimeProfileCap = getRuntimeProfile(localModelId);
+    const maxSystemTokens = Math.floor(runtimeProfileCap.contextLimit * (runtimeProfileCap.isSmallModel ? 0.35 : 0.50));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -2481,15 +2495,15 @@ Even for simple greetings, update memory with at least the conversation timestam
 
       abortRef.current = new AbortController();
       // Adaptive message limit: smaller context for small models to prevent GPU OOM
-      const lowMemRuntime = isRuntimeLowMemory();
-      const runtimeCtxSend = getRuntimeContextLimit(localModelId);
-      const isSmallModelSend = runtimeCtxSend <= 32768;
-      const MAX_MSGS = lowMemRuntime ? 6 : isSmallModelSend ? 8 : 16;
+      const runtimeProfile = getRuntimeProfile(localModelId);
+      const lowMemRuntime = runtimeProfile.lowMemory;
+      const isSmallModelSend = runtimeProfile.isSmallModel;
+      const MAX_MSGS = runtimeProfile.maxMsgs;
 
       // ─── STEP 1: Planning — skip for document queries, simple queries, AND small models ───
       // On small models (Qwen 0.5B), planning wastes a full LLM call that causes noticeable lag
       let researchQuestions = [];
-      if (!lowMemRuntime && !hasDocuments && !isSimpleQuery && !isSmallModelSend) {
+      if (runtimeProfile.planningEnabled && !hasDocuments && !isSimpleQuery) {
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -2587,13 +2601,13 @@ Rules:
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
       const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = isSmallModelSend;
-      const runtimeCtxMain = getRuntimeContextLimit(localModelId);
+      const runtimeCtxMain = runtimeProfile.contextLimit;
       const mainMaxTokens = isSmallModel
         ? Math.min(2048, Math.floor(runtimeCtxMain * 0.1))
         : Math.min(Math.floor(runtimeCtxMain * 0.12), 8192);
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware (Acer Aspire 5)
-      const streamThrottle = createStreamThrottle(setStreamingText, lowMemRuntime ? 260 : 180);
+      const streamThrottle = createStreamThrottle(setStreamingText, runtimeProfile.streamIntervalMs);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
