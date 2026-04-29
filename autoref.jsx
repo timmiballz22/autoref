@@ -44,6 +44,28 @@ async function clearSharedEngine() {
   _sharedEngineInitPromise = null;
 }
 
+
+function isDeviceLostLikeError(e) {
+  const msg = ((e && e.message) || String(e || "")).toLowerCase();
+  return msg.includes("device_removed")
+    || msg.includes("dxgi_error_device_removed")
+    || msg.includes("d3d12")
+    || msg.includes("requestdevice")
+    || msg.includes("gpu device")
+    || msg.includes("device lost");
+}
+
+async function rebuildEngineFromCache(modelId, onProgress) {
+  await clearSharedEngine();
+  const webllm = await getWebLLM();
+  const engineCfg = buildEngineConfig(webllm, modelId);
+  const engineOpts = {
+    initProgressCallback: (p) => onProgress && onProgress(p),
+  };
+  if (engineCfg) engineOpts.appConfig = engineCfg;
+  return getOrCreateSharedEngine(modelId, () => webllm.CreateMLCEngine(modelId, engineOpts));
+}
+
 // ─── Streaming throttle — batches UI updates to prevent lag on weak hardware ───
 function createStreamThrottle(setState, intervalMs = 180) {
   let pending = null;
@@ -195,6 +217,9 @@ function describeLoadError(e) {
   }
   if (/WebGPU|navigator\.gpu/i.test(msg)) {
     return "WebGPU not available. Use Chrome 113+ or Edge 113+, and ensure hardware acceleration is enabled.";
+  }
+  if (/dxgi_error_device_removed|device removed|d3d12 create command queue failed|requestdevice/i.test(msg)) {
+    return "GPU driver/device reset detected. Keep the same model and click Load to rebuild from local cache (no re-download needed).";
   }
   if (/out of memory|OOM|allocation/i.test(msg)) {
     return "GPU ran out of memory. Close other tabs, remove uploaded documents, or pick a smaller model (Qwen 0.5B).";
@@ -2226,11 +2251,19 @@ Even for simple greetings, update memory with at least the conversation timestam
         } catch {}
         throw new Error("Local model error: generation exceeded local device limits after multi-pass recovery. Keep the same model, ask for a shorter section, and I will continue from the last output automatically.");
       }
-      // Handle the specific "model not loaded" error — attempt reload
-      if (e.message && e.message.includes("not loaded")) {
+      // Recover from unloaded/lost GPU model by rebuilding engine from local cache (no re-download).
+      if ((e.message && e.message.includes("not loaded")) || isDeviceLostLikeError(e)) {
         try {
-          await localEngineRef.current.reload(localModelId);
-          const { content, usage } = await withTimeout(doCall(localEngineRef.current), "LLM call");
+          setLocalModelStatus("loading");
+          setLocalModelProgressText("GPU device reset detected. Reinitializing local model from cache...");
+          const rebuilt = await rebuildEngineFromCache(localModelId, (p) => {
+            setLocalModelProgress(Math.round((p.progress || 0) * 100));
+            if (p.text) setLocalModelProgressText(p.text);
+          });
+          localEngineRef.current = rebuilt;
+          setLocalModelStatus("ready");
+          setUseLocalModel(true);
+          const { content, usage } = await withTimeout(doCall(localEngineRef.current), "LLM call after GPU recovery");
           return {
             data: {
               choices: [{ message: { content } }],
@@ -2239,7 +2272,8 @@ Even for simple greetings, update memory with at least the conversation timestam
             usedModel: localModelId,
           };
         } catch (reloadErr) {
-          throw new Error(`Model reload failed. Please re-download the model from the sidebar. (${reloadErr.message})`);
+          setLocalModelStatus("cached");
+          throw new Error(`Model recovery failed after GPU reset. Cache is intact; click Load to retry without re-downloading. (${reloadErr.message})`);
         }
       }
       // Provide helpful error messages for common issues
