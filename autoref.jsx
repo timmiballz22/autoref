@@ -2021,6 +2021,18 @@ Even for simple greetings, update memory with at least the conversation timestam
         };
       });
     };
+    const makeUltraCompactMsgs = (msgs) => {
+      return msgs.map((m) => {
+        const raw = typeof m.content === "string" ? m.content : String(m.content || "");
+        const isSystem = m.role === "system";
+        const cap = isSystem ? 5500 : 2200;
+        if (raw.length <= cap) return m;
+        return {
+          ...m,
+          content: `${raw.slice(0, Math.floor(cap * 0.72))}\n\n[...ultra-compact mode enabled for low-memory device...]\n\n${raw.slice(-Math.floor(cap * 0.20))}`,
+        };
+      });
+    };
 
     const doCall = async (engine, msgsToSend = safeMsgs, limits = {}) => {
       const cappedMaxTokens = Math.max(256, limits.maxTokens || maxTokens);
@@ -2249,7 +2261,37 @@ Even for simple greetings, update memory with at least the conversation timestam
             };
           }
         } catch {}
-        throw new Error("Local model error: generation exceeded local device limits after multi-pass recovery. Keep the same model, ask for a shorter section, and I will continue from the last output automatically.");
+        // Never hard-fail here: force an ultra-compact fallback response so chat remains usable.
+        try {
+          const emergencyMsgs = [
+            ...makeUltraCompactMsgs(safeMsgs),
+            {
+              role: "user",
+              content:
+                "Low-memory recovery mode: answer ONLY section 1 of your best response (max 4 bullets, max 120 words). End with '[READY_FOR_NEXT_SECTION]' and do not repeat prior text.",
+            },
+          ];
+          const { content } = await doCall(localEngineRef.current, emergencyMsgs, {
+            maxTokens: Math.max(220, Math.floor(maxTokens * 0.22)),
+            temperature: 0.25,
+            timeoutMs: Math.max(timeoutMs, 120000),
+          });
+          const emergencyText = stripRecoveryNotes(content).trim();
+          if (emergencyText.length > 20) {
+            return {
+              data: {
+                choices: [{
+                  message: {
+                    content: `${emergencyText}\n\n[Auto-recovery note: ultra-compact low-memory mode was activated automatically. Say “continue” to stream the next section.]`,
+                  },
+                }],
+                usage: { prompt_tokens: 0, completion_tokens: estimateTokens(emergencyText) },
+              },
+              usedModel: localModelId,
+            };
+          }
+        } catch {}
+        throw new Error("Local model error: device memory limit reached repeatedly. Auto-recovery could not produce a safe partial response this turn. Keep the same model and retry with the same prompt; cached state is preserved.");
       }
       // Recover from unloaded/lost GPU model by rebuilding engine from local cache (no re-download).
       if ((e.message && e.message.includes("not loaded")) || isDeviceLostLikeError(e)) {
