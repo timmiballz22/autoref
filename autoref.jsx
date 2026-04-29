@@ -921,6 +921,26 @@ function buildDocIndex(docText, pageCount) {
   return toc.join("\n");
 }
 
+function parsePagesWithNumbers(docText) {
+  const text = String(docText || "");
+  const pattern = /=== \[Page (\d+)\] ===/g;
+  const markers = [];
+  let m;
+  while ((m = pattern.exec(text)) !== null) {
+    markers.push({ page: Number(m[1]), idx: m.index, markerLen: m[0].length });
+  }
+  if (markers.length === 0) return [];
+  const pages = [];
+  for (let i = 0; i < markers.length; i++) {
+    const cur = markers[i];
+    const start = cur.idx + cur.markerLen;
+    const end = i + 1 < markers.length ? markers[i + 1].idx : text.length;
+    const pageText = text.slice(start, end).trim();
+    pages.push({ page: cur.page, text: pageText });
+  }
+  return pages;
+}
+
 // Extracts text for specific page range from a document's full text
 function getDocPages(docText, startPage, endPage) {
   const parts = [];
