@@ -276,16 +276,68 @@ function buildAttachmentContext(msgs, pdfDocs) {
   const lines = atts.map(a => {
     const pg = Number(a.pageCount || 0);
     const status = a.isPdf ? (knownPdfNames.has(a.name) ? "extracted-and-available" : "uploaded-pdf") : (a.isImage ? "uploaded-image" : "uploaded-file");
-    return `- ${a.name} (${status}${pg > 0 ? `, ${pg} pages` : ""})`;
+    let readability = "";
+    if (a.isPdf) {
+      const doc = (Array.isArray(pdfDocs) ? pdfDocs : []).find(d => d.name === a.name);
+      if (doc) {
+        const scannedMarkers = (String(doc.text || "").match(/\(Scanned\/handwritten page/g) || []).length;
+        const scannedRatio = doc.pageCount > 0 ? (scannedMarkers / doc.pageCount) : 0;
+        readability = scannedRatio >= 0.6 ? ", likely-scanned (OCR needed)" : ", text-extracted";
+      }
+    }
+    return `- ${a.name} (${status}${pg > 0 ? `, ${pg} pages` : ""}${readability})`;
   });
   return (
     `<attached_artifacts>\n` +
     `The user has already uploaded these artifacts in this chat session (no URL is required):\n` +
     `${lines.join("\n")}\n` +
     `When the user asks to analyze/cross-reference them, proceed directly using available extracted content.\n` +
+    `If a PDF is likely scanned, explicitly continue with partial evidence and provide an OCR action plan per document.\n` +
     `Do NOT ask for links/URLs unless the file is explicitly missing.\n` +
     `</attached_artifacts>`
   );
+}
+
+function looksLikeCrossRefTask(text) {
+  const q = String(text || "").toLowerCase();
+  return /\bcross[\s-]?ref|cross[\s-]?reference|compare documents|reconcile documents|analy[sz]e (these|both) documents/.test(q);
+}
+
+function looksLikeCrossRefNonAnswer(text) {
+  const t = String(text || "").toLowerCase();
+  if (!t.trim()) return true;
+  const genericAck = /i will|i can|i'm ready|certainly|understood|please provide|please share|upload/i.test(t);
+  const hasFindingsSignals = /mismatch|difference|discrep|reference|page\s+\d+|finding|evidence|comparison/i.test(t);
+  return genericAck && !hasFindingsSignals;
+}
+
+function buildPdfToolResults(query, pdfDocs, maxHits = 8) {
+  const q = String(query || "").toLowerCase();
+  if (!q || !Array.isArray(pdfDocs) || pdfDocs.length === 0) return "";
+  const terms = extractQueryTerms(q).slice(0, 10);
+  if (terms.length === 0) return "";
+  const hits = [];
+  for (const doc of pdfDocs) {
+    const pages = parsePagesWithNumbers(doc.text || "");
+    for (const p of pages) {
+      const low = p.text.toLowerCase();
+      let score = 0;
+      for (const t of terms) if (low.includes(t)) score += 1;
+      if (score > 0) {
+        hits.push({
+          doc: doc.name,
+          page: p.page,
+          score,
+          snippet: p.text.slice(0, 320).replace(/\s+/g, " ").trim(),
+        });
+      }
+    }
+  }
+  hits.sort((a, b) => b.score - a.score);
+  const top = hits.slice(0, maxHits);
+  if (top.length === 0) return "";
+  const lines = top.map(h => `- [${h.doc}, Page ${h.page}, score:${h.score}] ${h.snippet}`);
+  return `<pdf_tool_results>\nAuto-retrieved relevant PDF snippets for this request:\n${lines.join("\n")}\n</pdf_tool_results>`;
 }
 
 // Translate WebLLM/WASM errors into actionable messages
@@ -2504,15 +2556,7 @@ Even for simple greetings, update memory with at least the conversation timestam
 
     // Determine query complexity for adaptive pipeline
     const hasDocuments = pdfDocs.length > 0;
-    const fastDecision = !hasDocuments && attachmentsMeta.length === 0 ? tryFastPracticalDecision(txt) : null;
-    if (fastDecision) {
-      currentMsgs = [...currentMsgs, { role: "assistant", content: fastDecision, _id: nextMsgId() }];
-      setMsgs([...currentMsgs]);
-      saveChat(currentMsgs);
-      setBusy(false);
-      busyRef.current = false;
-      return;
-    }
+    const isCrossRefTask = hasDocuments && looksLikeCrossRefTask(txt);
     const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
     let checkpointRaw = ""; // Partial response checkpoint for crash recovery
 
@@ -2606,7 +2650,13 @@ Rules:
       }
 
       // ─── STEP 3: Main agent synthesises with research context (with STREAMING) ───
-      setActivityStatus(reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking...");
+      setActivityStatus(isCrossRefTask
+        ? "Cross-referencing uploaded documents..."
+        : (reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking..."));
+      if (isCrossRefTask) {
+        setArtifactsOpen(true);
+        if (pdfDocs.length > 0) { setPdfViewerIdx(0); setPdfViewerOpen(true); }
+      }
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
@@ -2615,6 +2665,8 @@ Rules:
       let mainSystem = buildSystem();
       const artifactContext = buildAttachmentContext(currentMsgs, pdfDocs);
       if (artifactContext) mainSystem += `\n\n${artifactContext}`;
+      const pdfToolContext = hasDocuments ? buildPdfToolResults(txt || userContent || "", pdfDocs, runtimeProfile.lowMemory ? 4 : 8) : "";
+      if (pdfToolContext) mainSystem += `\n\n${pdfToolContext}`;
       if (reviewerFindings.length > 0) {
         mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
         for (const { question, findings } of reviewerFindings) {
@@ -2647,6 +2699,33 @@ Rules:
       streamThrottle.flush(); // Ensure final content is displayed
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
+      if (isCrossRefTask && /please\s+(share|provide|upload).*(document|file|url|link)|need.*(url|link)/i.test(mainRaw)) {
+        setActivityStatus("Cross-reference retry: using already uploaded artifacts...");
+        const retryMsgs = [
+          { role: "system", content: `${mainSystem}\n\nYou already have the uploaded artifacts in session context. Do NOT ask for links or re-upload. Start the cross-reference now and provide findings.` },
+          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+        ];
+        const { data: retryData } = await callAI(retryMsgs, {
+          maxTokens: mainMaxTokens,
+          timeoutMs: 180000,
+        });
+        mainRaw = extractRaw(retryData);
+      }
+      if (isCrossRefTask && looksLikeCrossRefNonAnswer(mainRaw)) {
+        setActivityStatus("Cross-reference continuation: extracting concrete findings...");
+        const continueMsgs = [
+          { role: "system", content: `${mainSystem}\n\nDo the analysis now. Output concrete cross-reference findings with page citations and a discrepancy list.` },
+          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          { role: "assistant", content: mainRaw },
+          { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
+        ];
+        const { data: continueData } = await callAI(continueMsgs, {
+          maxTokens: mainMaxTokens,
+          timeoutMs: 180000,
+        });
+        const continued = extractRaw(continueData);
+        if (continued) mainRaw = continued;
+      }
       setStreamingText(""); // Clear streaming display
 
       // ─── Abort check between pipeline steps ───

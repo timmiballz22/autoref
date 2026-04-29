@@ -30,25 +30,30 @@ This note tracks primary references reviewed for improving browser-local LLM rel
 17. https://mozilla.github.io/pdf.js/
 18. https://github.com/mozilla/pdf.js
 19. https://mozilla.github.io/pdf.js/examples/
+20. https://pymupdf.readthedocs.io/en/latest/recipes-ocr.html
+21. https://tesseract-ocr.github.io/tessdoc/
+22. https://cloud.google.com/document-ai/docs/ocr
+23. https://learn.microsoft.com/azure/ai-services/document-intelligence/
+24. https://docs.aws.amazon.com/textract/latest/dg/what-is.html
 
 ## Performance / memory practical references
-20. https://web.dev/articles/webgpu-best-practices
-21. https://web.dev/articles/off-main-thread
-22. https://web.dev/articles/memory-performance
-23. https://developer.chrome.com/docs/devtools/memory-problems
-24. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Memory_Management
+25. https://web.dev/articles/webgpu-best-practices
+26. https://web.dev/articles/off-main-thread
+27. https://web.dev/articles/memory-performance
+28. https://developer.chrome.com/docs/devtools/memory-problems
+29. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Memory_Management
 
 ## Model/tokenization + context pressure references
-25. https://huggingface.co/docs/transformers/main/en/llm_tutorial
-26. https://huggingface.co/docs/transformers/main/en/perf_infer_gpu_one
-27. https://huggingface.co/docs/transformers/main/en/perf_infer_gpu_many
-28. https://arxiv.org/abs/2309.06180
-29. https://arxiv.org/abs/2307.08691
+30. https://huggingface.co/docs/transformers/main/en/llm_tutorial
+31. https://huggingface.co/docs/transformers/main/en/perf_infer_gpu_one
+32. https://huggingface.co/docs/transformers/main/en/perf_infer_gpu_many
+33. https://arxiv.org/abs/2309.06180
+34. https://arxiv.org/abs/2307.08691
 
 ## Browser storage / persistence references
-30. https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage
-31. https://developer.mozilla.org/en-US/docs/Web/API/Cache
-32. https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API
+35. https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage
+36. https://developer.mozilla.org/en-US/docs/Web/API/Cache
+37. https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API
 
 ## Key conclusions applied in codebase
 - Keep attachment payloads out of visible chat messages and avoid inline data URLs/base64 for stability and UX.
