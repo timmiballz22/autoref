@@ -1104,6 +1104,9 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
   const [currentPage, setCurrentPage] = useState(initialPage || 1);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
+  const [pdfLoadError, setPdfLoadError] = useState("");
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfReloadTick, setPdfReloadTick] = useState(0);
   const canvasRef = useRef(null);
   const pdfDocRef = useRef(null);
   const [jumpPage, setJumpPage] = useState("");
@@ -1117,14 +1120,9 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
     let cancelled = false;
     (async () => {
       try {
-        let loadSource;
-        if (blobUrl) {
-          const resp = await fetch(blobUrl);
-          const buf = await resp.arrayBuffer();
-          loadSource = { data: buf };
-        } else {
-          loadSource = { data: pdfData };
-        }
+        setPdfLoadError("");
+        setPdfLoading(true);
+        const loadSource = blobUrl ? { url: blobUrl } : { data: pdfData };
         const pdf = await pdfjsLib.getDocument(loadSource).promise;
         if (cancelled) return;
         pdfDocRef.current = pdf;
@@ -1132,13 +1130,16 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
         setCurrentPage(Math.min(Math.max(initialPage || 1, 1), pdf.numPages));
       } catch (e) {
         console.error("PDF load error:", e);
+        if (!cancelled) setPdfLoadError(e?.message || "Failed to load PDF.");
+      } finally {
+        if (!cancelled) setPdfLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [pdfData, blobUrl]);
+  }, [pdfData, blobUrl, pdfReloadTick]);
 
   useEffect(() => {
-    if (!pdfDocRef.current || !canvasRef.current) return;
+    if (!pdfDocRef.current || !canvasRef.current || totalPages <= 0) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1179,28 +1180,36 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <span style={{ fontSize: "14px", fontWeight: 700, color: "#88bbcc" }}>PDF Viewer</span>
           <span style={{ fontSize: "11px", color: "#4e4e62", fontFamily: "monospace" }}>
-            Page {currentPage} of {totalPages}
+            {totalPages > 0 ? `Page ${currentPage} of ${totalPages}` : "Loading PDF pages..."}
           </span>
           {pageHighlights.length > 0 && (
             <span style={{ fontSize: "9px", padding: "1px 6px", borderRadius: "3px", background: "rgba(124,224,138,0.12)", color: "#7ce08a", border: "1px solid rgba(124,224,138,0.25)", fontFamily: "monospace" }}>
               {pageHighlights.length} highlight{pageHighlights.length !== 1 ? "s" : ""}
             </span>
           )}
+          {pdfLoadError && (
+            <span style={{ fontSize: "10px", color: "#f88", fontFamily: "var(--m)", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              {pdfLoadError}
+              <button onClick={() => setPdfReloadTick(v => v + 1)} style={{ border: "1px solid #cc777744", background: "#cc777715", color: "#f99", borderRadius: "4px", fontSize: "9px", padding: "1px 6px", cursor: "pointer" }}>
+                Retry Load
+              </button>
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <button onClick={() => goPage(currentPage - 1)} disabled={currentPage <= 1}
-            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: currentPage <= 1 ? "#333" : "#7ce08a", cursor: currentPage <= 1 ? "default" : "pointer", fontFamily: "monospace" }}>
+          <button onClick={() => goPage(currentPage - 1)} disabled={totalPages === 0 || currentPage <= 1}
+            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: (totalPages === 0 || currentPage <= 1) ? "#333" : "#7ce08a", cursor: (totalPages === 0 || currentPage <= 1) ? "default" : "pointer", fontFamily: "monospace" }}>
             ← Prev
           </button>
           <input
             value={jumpPage}
             onChange={e => setJumpPage(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter") { const n = parseInt(jumpPage); if (n >= 1 && n <= totalPages) { setCurrentPage(n); setJumpPage(""); } } }}
-            placeholder="#"
+            placeholder={totalPages > 0 ? "#" : "..."}
             style={{ width: "40px", padding: "4px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#ccc", textAlign: "center", fontFamily: "monospace", outline: "none" }}
           />
-          <button onClick={() => goPage(currentPage + 1)} disabled={currentPage >= totalPages}
-            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: currentPage >= totalPages ? "#333" : "#7ce08a", cursor: currentPage >= totalPages ? "default" : "pointer", fontFamily: "monospace" }}>
+          <button onClick={() => goPage(currentPage + 1)} disabled={totalPages === 0 || currentPage >= totalPages}
+            style={{ padding: "4px 10px", fontSize: "11px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: (totalPages === 0 || currentPage >= totalPages) ? "#333" : "#7ce08a", cursor: (totalPages === 0 || currentPage >= totalPages) ? "default" : "pointer", fontFamily: "monospace" }}>
             Next →
           </button>
           <div style={{ width: "1px", height: "20px", background: "#181824", margin: "0 4px" }} />
@@ -1220,6 +1229,7 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
       </div>
       {/* Canvas area with SVG highlight overlay */}
       <div style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "flex-start", padding: "20px" }}>
+        {pdfLoading && <div style={{ color: "#88bbcc", fontSize: "12px", fontFamily: "var(--m)", marginTop: "8px" }}>Loading PDF renderer…</div>}
         <div style={{ position: "relative", display: "inline-block" }}>
           <canvas ref={canvasRef} style={{ borderRadius: "4px", boxShadow: "0 4px 30px rgba(0,0,0,0.6)", display: "block" }} />
           {pageHighlights.length > 0 && canvasW > 0 && (
@@ -1405,6 +1415,7 @@ function Auto() {
   const [pdfViewerInitPage, setPdfViewerInitPage] = useState(1); // page to jump to on open
   const [docTextViewerOpen, setDocTextViewerOpen] = useState(false); // full extracted text viewer
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
+  const [docTextDraft, setDocTextDraft] = useState("");
   const [coordData, setCoordData] = useState({}); // docName -> {blocks: [structuredBlock]}
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
@@ -3065,10 +3076,20 @@ ${chatHtml}
     setExportedArtifacts(prev => [...prev, { id: "export-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
   }, [msgs, pdfDocs, localModelId]);
 
-  const regeneratePdfArtifact = useCallback((doc) => {
+  const regeneratePdfArtifact = useCallback((doc, format = "html") => {
     if (!doc) return;
     const safeName = String(doc.name || "document.pdf").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const body = String(doc.text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    const rawText = String(doc.text || "");
+    const body = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    if (format === "txt") {
+      const txtBlob = new Blob([rawText], { type: "text/plain" });
+      const txtUrl = URL.createObjectURL(txtBlob);
+      const txtName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.txt";
+      setExportedArtifacts(prev => [...prev, { id: "regen-txt-" + Date.now(), name: txtName, type: "text/plain", blobUrl: txtUrl, size: txtBlob.size, timestamp: new Date() }]);
+      try { window.open(txtUrl, "_blank"); } catch {}
+      setArtifactsOpen(true);
+      return;
+    }
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${safeName} - Regenerated Artifact</title>
 <style>body{font-family:system-ui,sans-serif;margin:18px;line-height:1.5} .meta{font-size:12px;color:#666;margin-bottom:10px;border-bottom:1px solid #ddd;padding-bottom:8px}</style>
 </head><body><h2>${safeName} — Regenerated Artifact</h2><div class="meta">Pages: ${doc.pageCount || 0} · Generated: ${new Date().toLocaleString()}</div><div>${body}</div></body></html>`;
@@ -3076,6 +3097,8 @@ ${chatHtml}
     const artifactUrl = URL.createObjectURL(artifactBlob);
     const artifactName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.html";
     setExportedArtifacts(prev => [...prev, { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
+    try { window.open(artifactUrl, "_blank"); } catch {}
+    setArtifactsOpen(true);
   }, []);
 
   // ═══ RENDER ═══
@@ -3119,21 +3142,28 @@ ${chatHtml}
               </span>
             </div>
             <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-              <button onClick={() => { navigator.clipboard.writeText(pdfDocs[docTextViewerIdx].text); }} style={{ ...btn("#88bbcc") }}>Copy All</button>
+              <button onClick={() => { navigator.clipboard.writeText(docTextDraft || pdfDocs[docTextViewerIdx].text); }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
-                const blob = new Blob([pdfDocs[docTextViewerIdx].text], { type: "text/plain" });
+                const idx = docTextViewerIdx;
+                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: (docTextDraft || d.text) } : d));
+              }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
+              <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft || pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
+              <button onClick={() => {
+                const blob = new Blob([docTextDraft || pdfDocs[docTextViewerIdx].text], { type: "text/plain" });
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
                 a.download = pdfDocs[docTextViewerIdx].name.replace(/\.pdf$/i, "") + "-extracted.txt";
                 a.click();
               }} style={{ ...btn("#7ce08a") }}>Download .txt</button>
-              <button onClick={() => setDocTextViewerOpen(false)} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px" }}>×</button>
+              <button onClick={() => { setDocTextViewerOpen(false); setDocTextDraft(""); }} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px" }}>×</button>
             </div>
           </div>
           <div style={{ flex: 1, overflow: "auto", padding: "16px 20px" }}>
-            <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--m)", fontSize: "12px", color: "var(--tx)", lineHeight: 1.7, margin: 0 }}>
-              {pdfDocs[docTextViewerIdx].text}
-            </pre>
+            <textarea
+              value={docTextDraft || pdfDocs[docTextViewerIdx].text}
+              onChange={e => setDocTextDraft(e.target.value)}
+              style={{ width: "100%", height: "100%", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--m)", fontSize: "12px", color: "var(--tx)", lineHeight: 1.7, margin: 0, background: "#0a0a12", border: "1px solid #1d1d28", borderRadius: "8px", padding: "12px", outline: "none", resize: "none" }}
+            />
           </div>
         </div>
       )}
@@ -3201,7 +3231,8 @@ ${chatHtml}
                         <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
                           <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
-                          <button onClick={() => regeneratePdfArtifact(doc)} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate Artifact</button>
+                          <button onClick={() => regeneratePdfArtifact(doc, "html")} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate HTML</button>
+                          <button onClick={() => regeneratePdfArtifact(doc, "txt")} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>Regenerate TXT</button>
                           {doc.blobUrl && (
                             <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
                           )}
@@ -3545,8 +3576,10 @@ ${chatHtml}
             <button
               onClick={() => {
                 if (pdfDocs.length > 0) {
-                  setDocTextViewerIdx(0);
-                  setDocTextViewerOpen(true);
+                  setPdfViewerIdx(0);
+                  setPdfViewerHighlights([]);
+                  setPdfViewerInitPage(1);
+                  setPdfViewerOpen(true);
                   setArtifactsOpen(true);
                 }
               }}
