@@ -1936,10 +1936,10 @@ Even for simple greetings, update memory with at least the conversation timestam
   // Options: { maxTokens, onChunk, timeoutMs, autoContinuePasses }
   const callAI = useCallback(async (apiMsgs, opts = {}) => {
     const {
-      maxTokens = 4096,
+      maxTokens = 2048,
       onChunk = null,
       timeoutMs = 90000,
-      autoContinuePasses = 3,
+      autoContinuePasses = 5,
     } = opts;
     // Validate engine is loaded and healthy
     if (!localEngineRef.current) {
@@ -1998,7 +1998,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     };
 
     const doCall = async (engine, msgsToSend = safeMsgs, limits = {}) => {
-      const cappedMaxTokens = Math.max(512, limits.maxTokens || maxTokens);
+      const cappedMaxTokens = Math.max(256, limits.maxTokens || maxTokens);
       const temp = Number.isFinite(limits.temperature) ? limits.temperature : 0.7;
       const dynamicTimeoutMs = limits.timeoutMs
         || Math.max(timeoutMs, Math.min(900000, Math.floor(90000 + estimateMessagesTokens(msgsToSend) * 10)));
@@ -2075,42 +2075,38 @@ Even for simple greetings, update memory with at least the conversation timestam
       }
     };
 
-    const continueFromPartial = async (seedText) => {
-      let combined = stripRecoveryNotes(seedText || "");
-      if (!combined) {
-        const fallback = String(seedText || "");
-        return {
-          content: fallback,
-          usage: { prompt_tokens: 0, completion_tokens: estimateTokens(fallback) },
-        };
+    const buildContinueMsgs = (baseMsgs, partial) => {
+      const compact = stripRecoveryNotes(partial || "").slice(-3000);
+      return [
+        ...makeRetryMsgs(baseMsgs),
+        {
+          role: "user",
+          content:
+            `Continue from exactly where you stopped. Do not restart or repeat.\n` +
+            `Last generated text tail:\n"""${compact}"""`,
+        },
+      ];
+    };
+
+    const runSegmentedRecovery = async (seedText, seedUsage = null) => {
+      let stitched = stripRecoveryNotes(seedText || "").trim();
+      let usage = seedUsage || { prompt_tokens: 0, completion_tokens: estimateTokens(stitched) };
+      let pass = 0;
+      while (pass < autoContinuePasses && stitched.length > 0 && looksIncomplete(stitched)) {
+        pass += 1;
+        const perPassMax = Math.max(256, Math.floor(maxTokens * (pass <= 2 ? 0.45 : 0.35)));
+        const perPassTimeout = Math.max(timeoutMs, 120000);
+        const { content, usage: u } = await doCall(
+          localEngineRef.current,
+          buildContinueMsgs(safeMsgs, stitched),
+          { maxTokens: perPassMax, temperature: 0.45, timeoutMs: perPassTimeout }
+        );
+        const cleaned = stripRecoveryNotes(content).trim();
+        if (!cleaned) break;
+        stitched += (/\s$/.test(stitched) ? "" : "\n") + cleaned;
+        if (u && (u.prompt_tokens || u.completion_tokens)) usage = u;
       }
-      let finalUsage = { prompt_tokens: 0, completion_tokens: estimateTokens(combined) };
-      for (let pass = 1; pass <= autoContinuePasses; pass++) {
-        if (!looksIncomplete(combined)) break;
-        const carry = combined.slice(-12000);
-        const continuationMsgs = [
-          ...makeRetryMsgs(safeMsgs),
-          { role: "assistant", content: carry },
-          {
-            role: "user",
-            content: "Continue exactly from the last sentence with no repetition. Finish the answer completely and end cleanly.",
-          },
-        ];
-        const { content: nextPart, usage } = await doCall(localEngineRef.current, continuationMsgs, {
-          maxTokens: Math.max(896, Math.floor(maxTokens * 0.75)),
-          temperature: 0.45,
-          timeoutMs: Math.max(timeoutMs, 150000),
-        });
-        const cleanedNext = stripRecoveryNotes(nextPart || "");
-        if (!cleanedNext) break;
-        if (combined.includes(cleanedNext.slice(0, Math.min(120, cleanedNext.length)))) break;
-        combined += (/\s$/.test(combined) || /^[,.;:!?]/.test(cleanedNext) ? "" : "\n") + cleanedNext;
-        finalUsage = usage || finalUsage;
-      }
-      return {
-        content: combined,
-        usage: finalUsage,
-      };
+      return { content: stitched, usage };
     };
 
     try {
@@ -2138,7 +2134,7 @@ Even for simple greetings, update memory with at least the conversation timestam
                 "LLM call retry"
               );
           const { content, usage } = await retryInvoke;
-          const continued = await continueFromPartial(content);
+          const continued = await runSegmentedRecovery(content, usage);
           return {
             data: {
               choices: [{ message: { content: continued.content } }],
@@ -2150,7 +2146,7 @@ Even for simple greetings, update memory with at least the conversation timestam
           console.warn("Timeout-safe retry failed:", retryErr);
           if (lastStreamedContent.length > 80) {
             try {
-              const continued = await continueFromPartial(lastStreamedContent);
+              const continued = await runSegmentedRecovery(lastStreamedContent);
               return {
                 data: {
                   choices: [{
@@ -2181,7 +2177,7 @@ Even for simple greetings, update memory with at least the conversation timestam
       if (e.message && /timed out|stalled/i.test(e.message)) {
         if (lastStreamedContent.length > 80) {
           try {
-            const continued = await continueFromPartial(lastStreamedContent);
+            const continued = await runSegmentedRecovery(lastStreamedContent);
             return {
               data: {
                 choices: [{
@@ -2208,27 +2204,27 @@ Even for simple greetings, update memory with at least the conversation timestam
         }
         // Hard fallback: explicit "continue from here" auto-attempt even when stream produced no usable partial.
         try {
-          const continueFromHereMsgs = [
+          const { content, usage } = await doCall(localEngineRef.current, [
             ...makeRetryMsgs(safeMsgs),
-            { role: "user", content: "continue from here. If there is no previous output, answer the original request directly and completely." },
-          ];
-          const { content, usage } = await doCall(localEngineRef.current, continueFromHereMsgs, {
-            maxTokens: Math.max(896, Math.floor(maxTokens * 0.7)),
-            temperature: 0.45,
-            timeoutMs: Math.max(timeoutMs, 180000),
+            { role: "user", content: "Answer in short sections (2-4 bullets per section) to reduce memory pressure. If prior output exists, continue from there without repeating." },
+          ], {
+            maxTokens: Math.max(384, Math.floor(maxTokens * 0.45)),
+            temperature: 0.4,
+            timeoutMs: Math.max(timeoutMs, 120000),
           });
-          const cleaned = stripRecoveryNotes(content);
+          const recovered = await runSegmentedRecovery(content, usage);
+          const cleaned = stripRecoveryNotes(recovered.content);
           if (cleaned.length > 40) {
             return {
               data: {
                 choices: [{ message: { content: `${cleaned}\n\n[Auto-recovery note: resumed automatically using \"continue from here\".]` } }],
-                usage: usage || { prompt_tokens: 0, completion_tokens: estimateTokens(cleaned) },
+                usage: recovered.usage || { prompt_tokens: 0, completion_tokens: estimateTokens(cleaned) },
               },
               usedModel: localModelId,
             };
           }
         } catch {}
-        throw new Error("Local model error: generation exceeded local device limits. Auto-continue from here was attempted but this device still could not complete the pass; retry once or switch to a lighter model.");
+        throw new Error("Local model error: generation exceeded local device limits after multi-pass recovery. Keep the same model, ask for a shorter section, and I will continue from the last output automatically.");
       }
       // Handle the specific "model not loaded" error — attempt reload
       if (e.message && e.message.includes("not loaded")) {
