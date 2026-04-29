@@ -1527,22 +1527,22 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     }
   }, [localModelStatus, localModelId]);
 
-  // Cleanup blob URLs when pdfDocs change or unmount (prevents memory leak)
-  const prevBlobUrlsRef = useRef([]);
+  // Track exported artifact blob URLs so they can be revoked on unmount only.
+  // IMPORTANT: do NOT revoke on every exportedArtifacts change — that would revoke
+  // live URLs the moment a new artifact is added, breaking the "Open" button.
+  const allArtifactUrlsRef = useRef([]);
   useEffect(() => {
-    const currentUrls = pdfDocs.map(d => d.blobUrl).filter(Boolean);
-    const removed = prevBlobUrlsRef.current.filter(u => !currentUrls.includes(u));
-    removed.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
-    prevBlobUrlsRef.current = currentUrls;
-    return () => { currentUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch {} }); };
-  }, [pdfDocs]);
+    // Collect any newly created artifact URLs so we can clean them on unmount.
+    const next = exportedArtifacts.map(a => a.blobUrl).filter(Boolean);
+    allArtifactUrlsRef.current = next;
+  }, [exportedArtifacts]);
 
-  // Cleanup exported artifact blob URLs on unmount
+  // Unmount-only cleanup for artifact blob URLs
   useEffect(() => {
     return () => {
-      exportedArtifacts.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+      allArtifactUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
     };
-  }, [exportedArtifacts]);
+  }, []);
 
   // Auto-rebuild cross-reference index whenever documents change
   // Requires at least 2 docs; clears refs when fewer than 2 are loaded
@@ -1886,9 +1886,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
                 ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
                 : att
             ));
-            // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
-            const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
-            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Store PDF bytes directly for viewer — blob URLs created from another context
+            // are revoked prematurely when React re-runs effects, causing HTTP-0 errors in PDF.js.
+            // Uint8Array keeps the data alive as long as pdfDocs holds the reference.
+            const pdfBytes = new Uint8Array(arrayBuffer);
+            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, pdfBytes }]);
             // Register editable text artifact version of the PDF extraction
             createPdfEditArtifact(file.name, text, pageCount);
             // Store coordinate-tagged blocks for cross-reference detection
@@ -1937,7 +1939,34 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+    // ─── Compact path: low-memory / very small context (Qwen 0.5B on 8GB devices) ───
+    // The full prompt exceeds the entire context window on these devices, so documents,
+    // memory, and the rules file never get injected. Use a lean prompt instead.
+    const runtimeProfileCap = getRuntimeProfile(localModelId);
+    if (runtimeProfileCap.contextLimit <= 4096) {
+      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.45 * 3.2);
+      let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
+Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
+`;
+      if (pdfDocs.length > 0) {
+        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
+        const docBudgetChars = Math.max(maxChars - reserved, 400);
+        const perDocChars = Math.max(Math.floor(docBudgetChars / pdfDocs.length), 200);
+        cs += `\n<documents>\n`;
+        for (const doc of pdfDocs) {
+          cs += `<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, perDocChars)}\n</document>\n`;
+        }
+        cs += `</documents>`;
+      }
+      if (mem && mem.trim()) {
+        cs += `\n\n<memory>\n${mem.trim().slice(0, 350)}\n</memory>`;
+      }
+      return cs;
+    }
+
     let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.
+IMPORTANT: Never use XML tool tags, <function=...>, <tool_call>, <web_search>, or any similar structured syntax — respond only in plain text and markdown.
 
 ## SMSF Document Expert
 
@@ -2091,7 +2120,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
     // Larger models: 50% cap — leaves room for chat history + generation
-    const runtimeProfileCap = getRuntimeProfile(localModelId);
+    // Note: runtimeProfileCap is already computed above (compact-path check).
     const maxSystemTokens = Math.floor(runtimeProfileCap.contextLimit * (runtimeProfileCap.isSmallModel ? 0.35 : 0.50));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
@@ -3123,8 +3152,7 @@ ${chatHtml}
       {/* PDF Viewer Modal (with coordinate highlights + page jump) */}
       {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
         <PdfViewer
-          pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
-          blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
+          pdfData={pdfDocs[pdfViewerIdx].pdfBytes}
           onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); }}
           highlights={pdfViewerHighlights}
           initialPage={pdfViewerInitPage}
@@ -3233,8 +3261,15 @@ ${chatHtml}
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "html")} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate HTML</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "txt")} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>Regenerate TXT</button>
-                          {doc.blobUrl && (
-                            <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
+                          {doc.pdfBytes && (
+                            <button onClick={() => {
+                              const blob = new Blob([doc.pdfBytes], { type: "application/pdf" });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = url; a.download = doc.name;
+                              document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                              setTimeout(() => URL.revokeObjectURL(url), 5000);
+                            }} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Download</button>
                           )}
                           <button onClick={() => {
                             const docName = doc.name;
