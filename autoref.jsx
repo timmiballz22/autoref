@@ -182,6 +182,28 @@ function buildEngineConfig(webllm, modelId) {
   if (!entry) return undefined; // model not in prebuilt list — let WebLLM use default
 
   const baseOverrides = { ...(entry.overrides || {}) };
+  const deviceMemoryGB = Number(navigator?.deviceMemory || 0);
+  const cpuThreads = Number(navigator?.hardwareConcurrency || 0);
+  const ua = String(navigator?.userAgent || "").toLowerCase();
+  const looksOlderIntelLaptop = /intel/.test(ua) && !/nvidia|radeon|amd/.test(ua);
+  const lowMemMode =
+    (Number.isFinite(deviceMemoryGB) && deviceMemoryGB > 0 && deviceMemoryGB <= 8) ||
+    (cpuThreads > 0 && cpuThreads <= 4) ||
+    looksOlderIntelLaptop;
+
+  // On 8GB-class devices (especially iGPU/shared-memory laptops), large context/prefill
+  // values can fail during model load/prefill before generation even starts.
+  // Keep defaults for stronger devices, but downshift for low-memory machines.
+  const isQwen05B = /Qwen2\.5-0\.5B/i.test(modelId);
+  const tunedContextWindow = lowMemMode
+    ? Math.min(modelDef.contextWindow, isQwen05B ? 2048 : 1024)
+    : modelDef.contextWindow;
+  const tunedSlidingWindow = lowMemMode
+    ? Math.min(modelDef.slidingWindow, isQwen05B ? 2048 : 1024)
+    : modelDef.slidingWindow;
+  const tunedPrefillChunk = lowMemMode
+    ? Math.min(modelDef.prefillChunk, isQwen05B ? 256 : 128)
+    : modelDef.prefillChunk;
   const hasPositiveSliding = Number(baseOverrides.sliding_window_size) > 0;
   const hasPositiveContext = Number(baseOverrides.context_window_size) > 0;
 
@@ -189,8 +211,8 @@ function buildEngineConfig(webllm, modelId) {
   // either context_window_size OR sliding_window_size.
   // Keep the model's native attention mode and disable the other one.
   const useSlidingWindow = hasPositiveSliding && !hasPositiveContext;
-  const resolvedContext = useSlidingWindow ? -1 : modelDef.contextWindow;
-  const resolvedSliding = useSlidingWindow ? modelDef.slidingWindow : -1;
+  const resolvedContext = useSlidingWindow ? -1 : tunedContextWindow;
+  const resolvedSliding = useSlidingWindow ? tunedSlidingWindow : -1;
 
   return {
     ...prebuilt,
@@ -200,10 +222,36 @@ function buildEngineConfig(webllm, modelId) {
         ...baseOverrides,
         context_window_size: resolvedContext,
         sliding_window_size: resolvedSliding,
-        prefill_chunk_size: modelDef.prefillChunk,
+        prefill_chunk_size: tunedPrefillChunk,
       },
     }],
   };
+}
+
+function getRuntimeContextLimit(modelId) {
+  const modelDef = LOCAL_MODELS.find(m => m.id === modelId);
+  if (!modelDef) return 2048;
+  const deviceMemoryGB = Number(navigator?.deviceMemory || 0);
+  const cpuThreads = Number(navigator?.hardwareConcurrency || 0);
+  const ua = String(navigator?.userAgent || "").toLowerCase();
+  const lowMemMode =
+    (Number.isFinite(deviceMemoryGB) && deviceMemoryGB > 0 && deviceMemoryGB <= 8) ||
+    (cpuThreads > 0 && cpuThreads <= 4) ||
+    (/intel/.test(ua) && !/nvidia|radeon|amd/.test(ua));
+  if (!lowMemMode) return modelDef.contextWindow;
+  const isQwen05B = /Qwen2\.5-0\.5B/i.test(modelId);
+  return Math.min(modelDef.contextWindow, isQwen05B ? 2048 : 1024);
+}
+
+function isRuntimeLowMemory() {
+  const deviceMemoryGB = Number(navigator?.deviceMemory || 0);
+  const cpuThreads = Number(navigator?.hardwareConcurrency || 0);
+  const ua = String(navigator?.userAgent || "").toLowerCase();
+  return (
+    (Number.isFinite(deviceMemoryGB) && deviceMemoryGB > 0 && deviceMemoryGB <= 8) ||
+    (cpuThreads > 0 && cpuThreads <= 4) ||
+    (/intel/.test(ua) && !/nvidia|radeon|amd/.test(ua))
+  );
 }
 
 // Translate WebLLM/WASM errors into actionable messages
@@ -236,6 +284,36 @@ function estimateTokens(text) {
 function estimateMessagesTokens(msgs) {
   if (!Array.isArray(msgs)) return 0;
   return msgs.reduce((sum, m) => sum + estimateTokens(typeof m?.content === "string" ? m.content : String(m?.content || "")), 0);
+}
+
+function buildDeterministicTaskPlanFromPrompt(msgs) {
+  const lastUser = [...(Array.isArray(msgs) ? msgs : [])].reverse().find(m => m?.role === "user");
+  const prompt = String(lastUser?.content || "").trim();
+  const compact = prompt.replace(/\s+/g, " ").slice(0, 320);
+  const problem = compact || "stability issue with the local model pipeline";
+  return (
+    `I could not safely run another local generation pass on this device, so I switched to deterministic recovery mode.\n\n` +
+    `Here is your immediate execution plan for: "${problem}"\n\n` +
+    `1) Reproduce & log (5 min)\n` +
+    `- Re-run once with the same model and capture exact failing stage: load, prefill, or decode.\n` +
+    `- Record prompt token estimate, max_tokens, uploaded document count/size, and browser tab memory pressure.\n\n` +
+    `2) Hard memory controls (10 min)\n` +
+    `- Force single-model mode (no model switching mid-turn).\n` +
+    `- Cap response target to short structured output first (task list), then continue in passes.\n` +
+    `- Reduce active context by trimming oldest turns and compressing documents before decode.\n\n` +
+    `3) Prompt methodology fix (10 min)\n` +
+    `- Start with "General Task List" output format before deep analysis.\n` +
+    `- Split work into phases: Diagnose -> Minimal Fix -> Verify -> Expand.\n` +
+    `- Avoid multi-objective prompts in one pass under 8GB systems.\n\n` +
+    `4) Optimization checks (15 min)\n` +
+    `- Validate model quantization/file compatibility with the runtime.\n` +
+    `- Lower generation budget and temperature for first pass stability.\n` +
+    `- Confirm WebGPU is stable and no background GPU-heavy tabs/apps are running.\n\n` +
+    `5) Verification gate (5 min)\n` +
+    `- If first pass succeeds, request "continue" for phase 2.\n` +
+    `- If it fails again, keep same model and retry with reduced context only (no extra fallbacks).\n\n` +
+    `If you want, send "run phase 1 now" and I will execute only the reproduction + logging checklist first.`
+  );
 }
 
 const SMSF_XREF_RULES_FILE = "SMSF_XRef_ModelRules.txt";
@@ -878,12 +956,30 @@ function nextMsgId() { return "m" + (++_msgIdCounter) + "-" + Date.now(); }
 
 // ─── Memoised single chat message — prevents re-rendering every message on each state change ───
 const ChatMessage = React.memo(function ChatMessage({ msg }) {
+  const msgAttachments = Array.isArray(msg.attachmentsMeta) ? msg.attachmentsMeta : [];
   return (
     <div style={{ alignSelf: msg.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: msg.role === "user" ? "row-reverse" : "row", contain: "layout style paint" }}>
       {msg.role === "assistant" && (
         <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
       )}
       <div style={{ background: msg.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
+        {msg.role === "user" && msgAttachments.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+            {msgAttachments.map((a, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: "3px 8px", borderRadius: "999px",
+                background: a.isPdf ? "rgba(136,187,204,0.12)" : "rgba(124,224,138,0.10)",
+                border: `1px solid ${a.isPdf ? "rgba(136,187,204,0.25)" : "rgba(124,224,138,0.2)"}`,
+                fontSize: "10px", fontFamily: "var(--m)", color: a.isPdf ? "var(--ac2)" : "var(--ac)",
+              }}>
+                <span>{a.isPdf ? "📚" : a.isImage ? "🖼️" : "📄"}</span>
+                <span>{a.name}</span>
+                {a.isPdf && Number(a.pageCount) > 0 && <span style={{ opacity: 0.8 }}>{a.pageCount}pg</span>}
+              </div>
+            ))}
+          </div>
+        )}
         {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
         {msg.role === "assistant" && (
           <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
@@ -1845,7 +1941,7 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
       }
       s += `</documents>`;
       // Inject auto-detected cross-reference index (only for larger models — keeps Qwen prompt tight)
-      const isSmallModel = LOCAL_MODELS.find(m => m.id === localModelId)?.contextWindow <= 32768;
+      const isSmallModel = getRuntimeContextLimit(localModelId) <= 32768;
       if (!isSmallModel && crossRefs.length > 0) s += formatCrossRefsForAI(crossRefs);
     }
 
@@ -1877,9 +1973,9 @@ Even for simple greetings, update memory with at least the conversation timestam
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
     // Larger models: 50% cap — leaves room for chat history + generation
-    const modelDefCap = LOCAL_MODELS.find(m => m.id === localModelId);
-    const isSmallCap = modelDefCap && modelDefCap.contextWindow <= 32768;
-    const maxSystemTokens = modelDefCap ? Math.floor(modelDefCap.contextWindow * (isSmallCap ? 0.35 : 0.50)) : 11000;
+    const runtimeCtxCap = getRuntimeContextLimit(localModelId);
+    const isSmallCap = runtimeCtxCap <= 32768;
+    const maxSystemTokens = Math.floor(runtimeCtxCap * (isSmallCap ? 0.35 : 0.50));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
       const charLimit = Math.floor(maxSystemTokens * 3.2);
@@ -2291,7 +2387,14 @@ Even for simple greetings, update memory with at least the conversation timestam
             };
           }
         } catch {}
-        throw new Error("Local model error: device memory limit reached repeatedly. Auto-recovery could not produce a safe partial response this turn. Keep the same model and retry with the same prompt; cached state is preserved.");
+        const deterministicPlan = buildDeterministicTaskPlanFromPrompt(safeMsgs);
+        return {
+          data: {
+            choices: [{ message: { content: deterministicPlan } }],
+            usage: { prompt_tokens: 0, completion_tokens: estimateTokens(deterministicPlan) },
+          },
+          usedModel: localModelId,
+        };
       }
       // Recover from unloaded/lost GPU model by rebuilding engine from local cache (no re-download).
       if ((e.message && e.message.includes("not loaded")) || isDeviceLostLikeError(e)) {
@@ -2338,21 +2441,17 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
-    // Build user message content with attachments
-    let userContent = txt;
-    if (attachments.length > 0) {
-      let attachBlock = "\n\n---\n**Attached files:**\n";
-      for (const att of attachments) {
-        if (att.isImage) {
-          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
-        } else {
-          const preview = (att.content || "").slice(0, 8000); // Expanded preview in chat message
-          attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
-        }
-      }
-      userContent = (txt || "Here are my attached files:") + attachBlock;
-    }
-    const userMsg = { role: "user", content: userContent, _id: nextMsgId() };
+    // Keep visible chat clean: do not inline attachment payloads into user message.
+    // Uploaded docs are already passed through system/document context.
+    const userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const attachmentsMeta = attachments.map(att => ({
+      name: att.name,
+      isPdf: !!att.isPdf,
+      isImage: !!att.isImage,
+      pageCount: Number(att.pageCount || 0),
+      size: Number(att.size || 0),
+    }));
+    const userMsg = { role: "user", content: userContent, attachmentsMeta, _id: nextMsgId() };
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
@@ -2382,14 +2481,15 @@ Even for simple greetings, update memory with at least the conversation timestam
 
       abortRef.current = new AbortController();
       // Adaptive message limit: smaller context for small models to prevent GPU OOM
-      const modelDefSend = LOCAL_MODELS.find(m => m.id === localModelId);
-      const isSmallModelSend = modelDefSend && modelDefSend.contextWindow <= 32768;
-      const MAX_MSGS = isSmallModelSend ? 8 : 16;
+      const lowMemRuntime = isRuntimeLowMemory();
+      const runtimeCtxSend = getRuntimeContextLimit(localModelId);
+      const isSmallModelSend = runtimeCtxSend <= 32768;
+      const MAX_MSGS = lowMemRuntime ? 6 : isSmallModelSend ? 8 : 16;
 
       // ─── STEP 1: Planning — skip for document queries, simple queries, AND small models ───
       // On small models (Qwen 0.5B), planning wastes a full LLM call that causes noticeable lag
       let researchQuestions = [];
-      if (!hasDocuments && !isSimpleQuery && !isSmallModelSend) {
+      if (!lowMemRuntime && !hasDocuments && !isSimpleQuery && !isSmallModelSend) {
         setActivityStatus("Planning: checking if web research is needed...");
         const planningSystem = `You are a planning agent for an SMSF expert assistant. Given the user's question, decide if web research is needed to answer it accurately.
 Respond ONLY with valid JSON in this exact format (no other text):
@@ -2429,7 +2529,7 @@ Rules:
 
       // ─── STEP 2: Reviewer agents — run in PARALLEL ───
       const reviewerFindings = [];
-      if (researchQuestions.length > 0) {
+      if (!lowMemRuntime && researchQuestions.length > 0) {
         setActivityStatus(`Researching ${researchQuestions.length} question(s) in parallel...`);
 
         const reviewerPromises = researchQuestions.map(async (question, i) => {
@@ -2485,12 +2585,15 @@ Rules:
 
       // Stream the main response for real-time display
       // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = modelDefSend;
+      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = isSmallModelSend;
-      const mainMaxTokens = isSmallModel ? Math.min(2048, Math.floor((modelDef?.contextWindow || 32768) * 0.1)) : modelDef ? Math.min(Math.floor(modelDef.contextWindow * 0.12), 8192) : 2048;
+      const runtimeCtxMain = getRuntimeContextLimit(localModelId);
+      const mainMaxTokens = isSmallModel
+        ? Math.min(2048, Math.floor(runtimeCtxMain * 0.1))
+        : Math.min(Math.floor(runtimeCtxMain * 0.12), 8192);
 
       // Throttled streaming — batches UI updates to prevent lag on weak hardware (Acer Aspire 5)
-      const streamThrottle = createStreamThrottle(setStreamingText, 180);
+      const streamThrottle = createStreamThrottle(setStreamingText, lowMemRuntime ? 260 : 180);
       const { data: mainData } = await callAI(mainApiMsgs, {
         maxTokens: mainMaxTokens,
         timeoutMs: 300000,
@@ -2683,7 +2786,29 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     }
   }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
 
-  const clearChat = () => { setMsgs([]); saveChat([]); setErr(null); };
+  const clearChat = async () => {
+    try { abortRef.current?.abort?.(); } catch {}
+    setMsgs([]);
+    setInput("");
+    setAttachments([]);
+    setStreamingText("");
+    setActivityStatus("");
+    setErr(null);
+    setUsage({ i: 0, o: 0 });
+    setCrossRefs([]);
+    setCrossRefPanelOpen(false);
+    setPdfDocs([]);
+    setPdfLoading([]);
+    setDocTextViewerOpen(false);
+    setPdfViewerOpen(false);
+    setArtifactsOpen(false);
+    setExportedArtifacts([]);
+    setMem("");
+    setMemDraft("");
+    try { await saveChat([]); } catch {}
+    try { await clearVal(CHAT_STORAGE_KEY); } catch {}
+    try { await clearVal(MEMORY_STORAGE_KEY); } catch {}
+  };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
   // ─── Navigate to a cross-reference: open PDF viewer, jump to page, show highlights ───
