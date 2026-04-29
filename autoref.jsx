@@ -300,19 +300,6 @@ function estimateMessagesTokens(msgs) {
   return msgs.reduce((sum, m) => sum + estimateTokens(typeof m?.content === "string" ? m.content : String(m?.content || "")), 0);
 }
 
-function tryFastPracticalDecision(text) {
-  const q = String(text || "").trim().toLowerCase();
-  if (!q) return null;
-  const driveWalkMatch = q.match(/(\d+(?:\.\d+)?)\s*(m|meter|meters|km|kilometer|kilometers).*(walk|drive)|(walk|drive).*(\d+(?:\.\d+)?)\s*(m|meter|meters|km|kilometer|kilometers)/i);
-  if (!driveWalkMatch || !/\bwalk\b/i.test(q) || !/\bdrive\b/i.test(q)) return null;
-  const n = parseFloat((driveWalkMatch[1] || driveWalkMatch[5] || "").toString());
-  const unit = ((driveWalkMatch[2] || driveWalkMatch[6] || "") + "").toLowerCase();
-  if (!Number.isFinite(n)) return null;
-  const meters = unit.startsWith("k") ? n * 1000 : n;
-  const recommendation = meters <= 120 ? "Drive" : "Drive";
-  return `${recommendation}. For a short trip to a car wash, driving the car there is the practical choice.\n\nReasoning:\n- You need the car at the wash bay anyway.\n- Walking there leaves the car behind and defeats the task.\n- The distance (${Math.round(meters)}m) is small, so keep it simple and drive carefully.`;
-}
-
 function buildDeterministicTaskPlanFromPrompt(msgs) {
   const lastUser = [...(Array.isArray(msgs) ? msgs : [])].reverse().find(m => m?.role === "user");
   const prompt = String(lastUser?.content || "").trim();
