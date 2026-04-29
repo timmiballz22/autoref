@@ -956,12 +956,30 @@ function nextMsgId() { return "m" + (++_msgIdCounter) + "-" + Date.now(); }
 
 // ─── Memoised single chat message — prevents re-rendering every message on each state change ───
 const ChatMessage = React.memo(function ChatMessage({ msg }) {
+  const msgAttachments = Array.isArray(msg.attachmentsMeta) ? msg.attachmentsMeta : [];
   return (
     <div style={{ alignSelf: msg.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: msg.role === "user" ? "row-reverse" : "row", contain: "layout style paint" }}>
       {msg.role === "assistant" && (
         <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
       )}
       <div style={{ background: msg.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
+        {msg.role === "user" && msgAttachments.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+            {msgAttachments.map((a, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: "3px 8px", borderRadius: "999px",
+                background: a.isPdf ? "rgba(136,187,204,0.12)" : "rgba(124,224,138,0.10)",
+                border: `1px solid ${a.isPdf ? "rgba(136,187,204,0.25)" : "rgba(124,224,138,0.2)"}`,
+                fontSize: "10px", fontFamily: "var(--m)", color: a.isPdf ? "var(--ac2)" : "var(--ac)",
+              }}>
+                <span>{a.isPdf ? "📚" : a.isImage ? "🖼️" : "📄"}</span>
+                <span>{a.name}</span>
+                {a.isPdf && Number(a.pageCount) > 0 && <span style={{ opacity: 0.8 }}>{a.pageCount}pg</span>}
+              </div>
+            ))}
+          </div>
+        )}
         {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
         {msg.role === "assistant" && (
           <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
@@ -2423,38 +2441,17 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
-    // Build user message content with attachments
-    let userContent = txt;
-    if (attachments.length > 0) {
-      let attachBlock = "\n\n---\n**Attached files:**\n";
-      for (const att of attachments) {
-        if (att.isImage) {
-          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB)\n`;
-        } else {
-          // Keep attachment payload light to prevent prompt bloat / stack overflow.
-          // Full PDF content is already included via <documents> in system prompt.
-          if (att.isPdf) {
-            attachBlock += `\n**[File: ${att.name}]** (application/pdf, ${(att.size/1024).toFixed(1)}KB)\n`;
-          } else {
-            const preview = (att.content || "").slice(0, 1200);
-            attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
-          }
-          if (att.isPdf) {
-            const scannedPages = (att.content.match(/\(Scanned\/handwritten page/g) || []).length;
-            if (scannedPages > 0) {
-              attachBlock += `\n[Artifact note] ${att.name} appears to be scanned/image-based (${scannedPages} scanned page marker${scannedPages > 1 ? "s" : ""}). `;
-              attachBlock += `I should still cross-reference what is available, clearly flag OCR limitations, and ask targeted questions instead of asking you to re-send files.\n`;
-            }
-          }
-        }
-      }
-      if (pdfDocs.length > 0) {
-        attachBlock += `\n\n[Cross-reference directive] Use ALL uploaded documents together.`;
-        attachBlock += ` Do not ask for "specific sections" first. Start with a whole-document pass and explicitly list mismatches, missing evidence, and follow-up questions.\n`;
-      }
-      userContent = (txt || "Here are my attached files:") + attachBlock;
-    }
-    const userMsg = { role: "user", content: userContent, _id: nextMsgId() };
+    // Keep visible chat clean: do not inline attachment payloads into user message.
+    // Uploaded docs are already passed through system/document context.
+    const userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const attachmentsMeta = attachments.map(att => ({
+      name: att.name,
+      isPdf: !!att.isPdf,
+      isImage: !!att.isImage,
+      pageCount: Number(att.pageCount || 0),
+      size: Number(att.size || 0),
+    }));
+    const userMsg = { role: "user", content: userContent, attachmentsMeta, _id: nextMsgId() };
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
