@@ -2504,6 +2504,15 @@ Even for simple greetings, update memory with at least the conversation timestam
 
     // Determine query complexity for adaptive pipeline
     const hasDocuments = pdfDocs.length > 0;
+    const fastDecision = !hasDocuments && attachmentsMeta.length === 0 ? tryFastPracticalDecision(txt) : null;
+    if (fastDecision) {
+      currentMsgs = [...currentMsgs, { role: "assistant", content: fastDecision, _id: nextMsgId() }];
+      setMsgs([...currentMsgs]);
+      saveChat(currentMsgs);
+      setBusy(false);
+      busyRef.current = false;
+      return;
+    }
     const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
     let checkpointRaw = ""; // Partial response checkpoint for crash recovery
 
