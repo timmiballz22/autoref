@@ -268,6 +268,22 @@ function getRuntimeProfile(modelId) {
   };
 }
 
+// Detect when a small model has emitted hallucinated training data (multilingual garbage).
+// Returns true when the text has excessive non-Latin Unicode characters mixed with random words —
+// a clear sign the model lost coherence and is regurgitating training corpus patterns.
+function isGarbledOutput(text) {
+  if (!text || text.length < 80) return false;
+  // Count CJK (Chinese/Japanese/Korean), Arabic, Thai, Devanagari etc.
+  const nonLatinCJKArabicThai = (text.match(/[฀-๿؀-ۿऀ-ॿ一-鿿　-〿가-힯Ѐ-ӿ]/g) || []).length;
+  const total = text.length;
+  // If > 12% of the content is non-Latin/CJK/Arabic/Thai characters and > 30 such chars, likely garbled
+  if (nonLatinCJKArabicThai > 30 && nonLatinCJKArabicThai / total > 0.12) return true;
+  // Also detect rapid language-switching: short runs of multiple scripts mixed together
+  const multiScriptRuns = (text.match(/[一-鿿]{2,}|[฀-๿]{2,}|[؀-ۿ]{2,}/g) || []).length;
+  if (multiScriptRuns >= 4) return true;
+  return false;
+}
+
 function buildAttachmentContext(msgs, pdfDocs) {
   const latestUser = [...(Array.isArray(msgs) ? msgs : [])].reverse().find(m => m?.role === "user");
   const atts = Array.isArray(latestUser?.attachmentsMeta) ? latestUser.attachmentsMeta : [];
@@ -2302,7 +2318,12 @@ Even for simple greetings, update memory with at least the conversation timestam
 
     const doCall = async (engine, msgsToSend = safeMsgs, limits = {}) => {
       const cappedMaxTokens = Math.max(256, limits.maxTokens || maxTokens);
-      const temp = Number.isFinite(limits.temperature) ? limits.temperature : 0.7;
+      const rp = getRuntimeProfile(localModelId);
+      // Small models need lower temperature and a repetition penalty to avoid hallucinating
+      // training-data garbage (multilingual token loops, random Unicode runs, etc.)
+      const defaultTemp = rp.isSmallModel ? 0.35 : 0.65;
+      const temp = Number.isFinite(limits.temperature) ? Math.min(limits.temperature, rp.isSmallModel ? 0.5 : 0.8) : defaultTemp;
+      const repetitionPenalty = rp.isSmallModel ? 1.15 : 1.05;
       const dynamicTimeoutMs = limits.timeoutMs
         || Math.max(timeoutMs, Math.min(900000, Math.floor(90000 + estimateMessagesTokens(msgsToSend) * 10)));
       // Use streaming if onChunk callback is provided
@@ -2313,6 +2334,7 @@ Even for simple greetings, update memory with at least the conversation timestam
             messages: msgsToSend,
             temperature: temp,
             max_tokens: cappedMaxTokens,
+            frequency_penalty: repetitionPenalty - 1.0, // OpenAI-compat approximation
             stream: true,
           });
         } catch (createErr) {
@@ -2369,6 +2391,7 @@ Even for simple greetings, update memory with at least the conversation timestam
           messages: msgsToSend,
           temperature: temp,
           max_tokens: cappedMaxTokens,
+          frequency_penalty: repetitionPenalty - 1.0,
         }), "LLM call");
         const content = resp.choices?.[0]?.message?.content || "";
         return {
@@ -2415,6 +2438,29 @@ Even for simple greetings, update memory with at least the conversation timestam
     try {
       const invoke = onChunk ? doCall(localEngineRef.current) : withTimeout(doCall(localEngineRef.current), "LLM call");
       const { content, usage } = await invoke;
+
+      // Garbled-output guard: detect hallucinated multilingual token soup and retry at lower temp
+      if (isGarbledOutput(content) && !abortRef.current?.signal?.aborted) {
+        console.warn("Garbled output detected — retrying with lower temperature and ultra-compact prompt");
+        try {
+          const cleanMsgs = makeUltraCompactMsgs(safeMsgs);
+          const { content: cleanContent, usage: cleanUsage } = await doCall(
+            localEngineRef.current, cleanMsgs,
+            { maxTokens: Math.max(256, Math.floor(maxTokens * 0.6)), temperature: 0.2, timeoutMs }
+          );
+          if (!isGarbledOutput(cleanContent) && cleanContent.length > 20) {
+            return { data: { choices: [{ message: { content: cleanContent } }], usage: cleanUsage }, usedModel: localModelId };
+          }
+        } catch (garbleRetryErr) {
+          console.warn("Garbled-output retry failed:", garbleRetryErr);
+        }
+        // If retry also garbled, surface a clear error instead of showing garbage
+        return {
+          data: { choices: [{ message: { content: "I got confused and generated garbled text. Please try again with a shorter message, or clear the chat and retry." } }], usage },
+          usedModel: localModelId,
+        };
+      }
+
       return {
         data: {
           choices: [{ message: { content } }],
