@@ -1100,7 +1100,7 @@ const ChatMessage = React.memo(function ChatMessage({ msg }) {
 // ─── PDF Viewer Component (with coordinate highlight overlay) ───
 // highlights: [{page,x,y,w,h,pageHeight,color?,label?}]  — PDF-space coordinates
 // initialPage: page number to jump to on open
-function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1 }) {
+function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1, crossRefTarget = null, onNavigateTarget }) {
   const [currentPage, setCurrentPage] = useState(initialPage || 1);
   const [totalPages, setTotalPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
@@ -1122,6 +1122,8 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
       try {
         setPdfLoadError("");
         setPdfLoading(true);
+        // Destroy previous document before loading a new one
+        if (pdfDocRef.current) { try { pdfDocRef.current.destroy(); } catch {} pdfDocRef.current = null; }
         const loadSource = blobUrl ? { url: blobUrl } : { data: pdfData };
         const pdf = await pdfjsLib.getDocument(loadSource).promise;
         if (cancelled) return;
@@ -1138,6 +1140,11 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
     return () => { cancelled = true; };
   }, [pdfData, blobUrl, pdfReloadTick]);
 
+  // Destroy PDF document on unmount to free GPU/memory resources
+  useEffect(() => {
+    return () => { if (pdfDocRef.current) { try { pdfDocRef.current.destroy(); } catch {} pdfDocRef.current = null; } };
+  }, []);
+
   useEffect(() => {
     if (!pdfDocRef.current || !canvasRef.current || totalPages <= 0) return;
     let cancelled = false;
@@ -1153,6 +1160,7 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
         const ctx = canvas.getContext("2d");
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         await page.render({ canvasContext: ctx, viewport }).promise;
+        page.cleanup();
         if (!cancelled) { setCanvasW(canvas.width); setCanvasH(canvas.height); }
       } catch (e) {
         console.error("Page render error:", e);
@@ -1221,6 +1229,13 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
           <button onClick={() => setZoom(1.0)}
             style={{ padding: "4px 8px", fontSize: "10px", borderRadius: "4px", border: "1px solid #181824", background: "#0a0a12", color: "#4e4e62", cursor: "pointer", fontFamily: "monospace" }}>Fit</button>
           <div style={{ width: "1px", height: "20px", background: "#181824", margin: "0 4px" }} />
+          {crossRefTarget && onNavigateTarget && (
+            <button onClick={() => onNavigateTarget(crossRefTarget)}
+              style={{ padding: "4px 10px", fontSize: "10px", borderRadius: "4px", border: "1px solid rgba(136,187,204,0.4)", background: "rgba(136,187,204,0.08)", color: "#88bbcc", cursor: "pointer", fontFamily: "monospace", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={`Go to match in ${crossRefTarget.docName}, page ${crossRefTarget.page}`}>
+              → {crossRefTarget.docName}, p.{crossRefTarget.page}
+            </button>
+          )}
           <button onClick={onClose}
             style={{ padding: "4px 12px", fontSize: "12px", borderRadius: "4px", border: "1px solid #cc777733", background: "#cc77770a", color: "#cc7777", cursor: "pointer", fontWeight: 600 }}>
             Close ✕
@@ -1413,6 +1428,7 @@ function Auto() {
   const [pdfViewerIdx, setPdfViewerIdx] = useState(0); // which pdf to view
   const [pdfViewerHighlights, setPdfViewerHighlights] = useState([]); // coordinate highlights for PDF viewer
   const [pdfViewerInitPage, setPdfViewerInitPage] = useState(1); // page to jump to on open
+  const [pdfViewerCrossRefTarget, setPdfViewerCrossRefTarget] = useState(null); // {docName, page, coords, keyword} — cross-ref target in a different doc
   const [docTextViewerOpen, setDocTextViewerOpen] = useState(false); // full extracted text viewer
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
   const [docTextDraft, setDocTextDraft] = useState("");
@@ -1527,22 +1543,22 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     }
   }, [localModelStatus, localModelId]);
 
-  // Cleanup blob URLs when pdfDocs change or unmount (prevents memory leak)
-  const prevBlobUrlsRef = useRef([]);
+  // Track exported artifact blob URLs so they can be revoked on unmount only.
+  // IMPORTANT: do NOT revoke on every exportedArtifacts change — that would revoke
+  // live URLs the moment a new artifact is added, breaking the "Open" button.
+  const allArtifactUrlsRef = useRef([]);
   useEffect(() => {
-    const currentUrls = pdfDocs.map(d => d.blobUrl).filter(Boolean);
-    const removed = prevBlobUrlsRef.current.filter(u => !currentUrls.includes(u));
-    removed.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
-    prevBlobUrlsRef.current = currentUrls;
-    return () => { currentUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch {} }); };
-  }, [pdfDocs]);
+    // Collect any newly created artifact URLs so we can clean them on unmount.
+    const next = exportedArtifacts.map(a => a.blobUrl).filter(Boolean);
+    allArtifactUrlsRef.current = next;
+  }, [exportedArtifacts]);
 
-  // Cleanup exported artifact blob URLs on unmount
+  // Unmount-only cleanup for artifact blob URLs
   useEffect(() => {
     return () => {
-      exportedArtifacts.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+      allArtifactUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
     };
-  }, [exportedArtifacts]);
+  }, []);
 
   // Auto-rebuild cross-reference index whenever documents change
   // Requires at least 2 docs; clears refs when fewer than 2 are loaded
@@ -1553,6 +1569,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     const refs = buildCrossRefIndex(docsData);
     setCrossRefs(refs);
   }, [coordData]);
+
+  // Clear draft text when the user switches to a different document in DocTextViewer
+  useEffect(() => { setDocTextDraft(""); }, [docTextViewerIdx]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -1886,9 +1905,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
                 ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
                 : att
             ));
-            // Store PDF data for viewer — use Blob URL instead of raw ArrayBuffer
-            const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: "application/pdf" }));
-            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, blobUrl }]);
+            // Store PDF bytes directly for viewer — blob URLs created from another context
+            // are revoked prematurely when React re-runs effects, causing HTTP-0 errors in PDF.js.
+            // Uint8Array keeps the data alive as long as pdfDocs holds the reference.
+            const pdfBytes = new Uint8Array(arrayBuffer);
+            setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, pdfBytes }]);
             // Register editable text artifact version of the PDF extraction
             createPdfEditArtifact(file.name, text, pageCount);
             // Store coordinate-tagged blocks for cross-reference detection
@@ -1937,7 +1958,34 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   // ─── System prompt builder ───
   const buildSystem = useCallback(() => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+    // ─── Compact path: low-memory / very small context (Qwen 0.5B on 8GB devices) ───
+    // The full prompt exceeds the entire context window on these devices, so documents,
+    // memory, and the rules file never get injected. Use a lean prompt instead.
+    const runtimeProfileCap = getRuntimeProfile(localModelId);
+    if (runtimeProfileCap.contextLimit <= 4096) {
+      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.45 * 3.2);
+      let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
+Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
+`;
+      if (pdfDocs.length > 0) {
+        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
+        const docBudgetChars = Math.max(maxChars - reserved, 400);
+        const perDocChars = Math.max(Math.floor(docBudgetChars / pdfDocs.length), 200);
+        cs += `\n<documents>\n`;
+        for (const doc of pdfDocs) {
+          cs += `<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, perDocChars)}\n</document>\n`;
+        }
+        cs += `</documents>`;
+      }
+      if (mem && mem.trim()) {
+        cs += `\n\n<memory>\n${mem.trim().slice(0, 350)}\n</memory>`;
+      }
+      return cs;
+    }
+
     let s = `You are Auto, a brutally honest, exceptionally loyal, warm AI assistant specialising in Australian Self-Managed Superannuation Funds (SMSFs). You are curious, honest, loyal, trustworthy, helpful, and thorough. Use markdown formatting. Today is ${today}. Trust is your number 1 value.
+IMPORTANT: Never use XML tool tags, <function=...>, <tool_call>, <web_search>, or any similar structured syntax — respond only in plain text and markdown.
 
 ## SMSF Document Expert
 
@@ -2091,7 +2139,7 @@ Even for simple greetings, update memory with at least the conversation timestam
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
     // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
     // Larger models: 50% cap — leaves room for chat history + generation
-    const runtimeProfileCap = getRuntimeProfile(localModelId);
+    // Note: runtimeProfileCap is already computed above (compact-path check).
     const maxSystemTokens = Math.floor(runtimeProfileCap.contextLimit * (runtimeProfileCap.isSmallModel ? 0.35 : 0.50));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
@@ -2696,7 +2744,9 @@ Rules:
       let mainSystem = buildSystem();
       const artifactContext = buildAttachmentContext(currentMsgs, pdfDocs);
       if (artifactContext) mainSystem += `\n\n${artifactContext}`;
-      const pdfToolContext = hasDocuments ? buildPdfToolResults(txt || userContent || "", pdfDocs, runtimeProfile.lowMemory ? 4 : 8) : "";
+      // Skip pdfToolContext in compact mode — the compact buildSystem already inlines doc content
+      const isCompactMode = runtimeProfile.contextLimit <= 4096;
+      const pdfToolContext = (hasDocuments && !isCompactMode) ? buildPdfToolResults(txt || userContent || "", pdfDocs, runtimeProfile.lowMemory ? 4 : 8) : "";
       if (pdfToolContext) mainSystem += `\n\n${pdfToolContext}`;
       if (reviewerFindings.length > 0) {
         mainSystem += `\n\n<web_research>\nThe following web research was conducted by reviewer agents on your behalf. Use it to inform your response and cite it where relevant:\n`;
@@ -2900,8 +2950,9 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
         currentMsgs = [...currentMsgs, { role: "assistant", content: displayText + `\n\n---\n*Memory updated and saved to memory.txt*`, _id: nextMsgId() }];
       } else {
         currentMsgs = [...currentMsgs, { role: "assistant", content: displayText, _id: nextMsgId() }];
-        const autoMemory = mem.trim()
-          ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`
+        const currentMem = memRef.current;
+        const autoMemory = currentMem.trim()
+          ? currentMem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`
           : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`;
         setMem(autoMemory);
         setMemDraft(autoMemory);
@@ -2951,6 +3002,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     setErr(null);
     setUsage({ i: 0, o: 0 });
     setCrossRefs([]);
+    setCoordData({});
     setCrossRefPanelOpen(false);
     setPdfDocs([]);
     setPdfLoading([]);
@@ -2973,9 +3025,13 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     const highlights = [];
     // Source location — green
     highlights.push({ page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` });
-    // Target location (same doc only — shown on its own page, blue)
     if (ref.targetDoc === ref.sourceDoc) {
+      // Same-doc: add blue target highlight directly
       highlights.push({ page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${ref.keyword}` });
+      setPdfViewerCrossRefTarget(null);
+    } else {
+      // Different doc: store target so PdfViewer can show a navigation banner
+      setPdfViewerCrossRefTarget({ docName: ref.targetDoc, page: ref.targetPage, coords: ref.targetCoords, keyword: ref.keyword });
     }
     setPdfViewerHighlights(highlights);
     setPdfViewerInitPage(ref.sourcePage);
@@ -3008,7 +3064,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
         .replace(/^# (.+)$/gm, '<h2 style="color:#1a5276;margin:20px 0 10px;font-size:18px">$1</h2>')
         .replace(/^---+$/gm, '<hr style="border:none;border-top:1px solid #ccc;margin:12px 0">')
         .replace(/^[\-\*] (.+)$/gm, '<div style="display:flex;gap:6px;margin:2px 0"><span style="color:#2980b9">•</span><span>$1</span></div>')
-        .replace(/^\d+\. (.+)$/gm, (_, t, i) => `<div style="display:flex;gap:6px;margin:2px 0"><span style="color:#2980b9;min-width:18px">${i + 1}.</span><span>${t}</span></div>`)
+        .replace(/^\d+\. (.+)$/gm, (() => { let n = 0; return (_, t) => `<div style="display:flex;gap:6px;margin:2px 0"><span style="color:#2980b9;min-width:18px">${++n}.</span><span>${t}</span></div>`; })())
         .replace(/\n\n/g, "</p><p>")
         .replace(/\n/g, "<br>");
     };
@@ -3058,16 +3114,18 @@ ${chatHtml}
     const printWin = window.open(url, "_blank");
     if (printWin) {
       printWin.onload = () => {
-        setTimeout(() => { printWin.print(); }, 500);
+        setTimeout(() => { printWin.print(); URL.revokeObjectURL(url); }, 500);
       };
+      // Safety fallback: revoke after 30s even if onload never fires (e.g. popup blocked then allowed)
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
     } else {
       // Fallback: download as HTML
       const a = document.createElement("a");
       a.href = url;
       a.download = `SMSF-Analysis-${new Date().toISOString().slice(0,10)}.html`;
-      a.click();
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
     }
-    URL.revokeObjectURL(url);
 
     // Register a separate artifact entry for the Artifacts panel (keep its own URL)
     const artifactBlob = new Blob([html], { type: "text/html" });
@@ -3123,11 +3181,19 @@ ${chatHtml}
       {/* PDF Viewer Modal (with coordinate highlights + page jump) */}
       {pdfViewerOpen && pdfDocs[pdfViewerIdx] && (
         <PdfViewer
-          pdfData={pdfDocs[pdfViewerIdx].arrayBuffer}
-          blobUrl={pdfDocs[pdfViewerIdx].blobUrl}
-          onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); }}
+          pdfData={pdfDocs[pdfViewerIdx].pdfBytes}
+          onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }}
           highlights={pdfViewerHighlights}
           initialPage={pdfViewerInitPage}
+          crossRefTarget={pdfViewerCrossRefTarget}
+          onNavigateTarget={(target) => {
+            const tgtIdx = pdfDocs.findIndex(d => d.name === target.docName);
+            if (tgtIdx < 0) return;
+            setPdfViewerHighlights([{ page: target.page, ...target.coords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${target.keyword}` }]);
+            setPdfViewerInitPage(target.page);
+            setPdfViewerIdx(tgtIdx);
+            setPdfViewerCrossRefTarget(null);
+          }}
         />
       )}
       {/* Full Document Text Viewer Modal — shows complete extracted text for cross-referencing */}
@@ -3150,10 +3216,12 @@ ${chatHtml}
               <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft || pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
               <button onClick={() => {
                 const blob = new Blob([docTextDraft || pdfDocs[docTextViewerIdx].text], { type: "text/plain" });
+                const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
-                a.href = URL.createObjectURL(blob);
+                a.href = url;
                 a.download = pdfDocs[docTextViewerIdx].name.replace(/\.pdf$/i, "") + "-extracted.txt";
-                a.click();
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
               }} style={{ ...btn("#7ce08a") }}>Download .txt</button>
               <button onClick={() => { setDocTextViewerOpen(false); setDocTextDraft(""); }} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px" }}>×</button>
             </div>
@@ -3233,8 +3301,15 @@ ${chatHtml}
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "html")} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate HTML</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "txt")} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>Regenerate TXT</button>
-                          {doc.blobUrl && (
-                            <a href={doc.blobUrl} download={doc.name} style={{ ...btn("#7ce08a"), fontSize: "9px", textDecoration: "none", display: "inline-block" }}>Download</a>
+                          {doc.pdfBytes && (
+                            <button onClick={() => {
+                              const blob = new Blob([doc.pdfBytes], { type: "application/pdf" });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = url; a.download = doc.name;
+                              document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                              setTimeout(() => URL.revokeObjectURL(url), 5000);
+                            }} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Download</button>
                           )}
                           <button onClick={() => {
                             const docName = doc.name;
