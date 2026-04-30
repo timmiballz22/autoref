@@ -1169,6 +1169,11 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
     return () => { cancelled = true; };
   }, [currentPage, zoom, totalPages]);
 
+  // Jump to the requested initial page whenever it changes (e.g. new cross-ref navigation)
+  useEffect(() => {
+    if (totalPages > 0 && initialPage >= 1) setCurrentPage(Math.min(Math.max(initialPage, 1), totalPages));
+  }, [initialPage, totalPages]);
+
   const goPage = (n) => { if (n >= 1 && n <= totalPages) setCurrentPage(n); };
   const renderScale = zoom * 1.5;
   const pageHighlights = highlights.filter(h => h.page === currentPage);
