@@ -377,10 +377,13 @@ function describeLoadError(e) {
   return msg || "Unknown error";
 }
 
-// ─── Estimate token count from text (conservative ~3.2 chars per token to prevent OOM) ───
+// ─── Estimate token count from text ───
+// Use ~2.8 chars/token (more conservative than 3.2) — byte-level BPE tokenizers
+// in small models produce more tokens per character, especially with XML/markdown.
+// Undercounting tokens causes the system prompt to overflow context and starve user messages.
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 3.2);
+  return Math.ceil(text.length / 2.8);
 }
 
 function estimateMessagesTokens(msgs) {
@@ -1985,7 +1988,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     // memory, and the rules file never get injected. Use a lean prompt instead.
     const runtimeProfileCap = getRuntimeProfile(localModelId);
     if (runtimeProfileCap.contextLimit <= 4096) {
-      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.45 * 3.2);
+      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.30 * 2.8);
       let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
 Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
 `;
@@ -2158,13 +2161,13 @@ Even for simple greetings, update memory with at least the conversation timestam
     s += ``;
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
-    // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
-    // Larger models: 50% cap — leaves room for chat history + generation
-    // Note: runtimeProfileCap is already computed above (compact-path check).
-    const maxSystemTokens = Math.floor(runtimeProfileCap.contextLimit * (runtimeProfileCap.isSmallModel ? 0.35 : 0.50));
+    // Reserve context for: chat messages (30%), generation (15%), safety margin (5%).
+    // System prompt gets the remainder. This ensures user messages are NEVER starved.
+    const contextLimit = runtimeProfileCap.contextLimit;
+    const maxSystemTokens = Math.floor(contextLimit * (runtimeProfileCap.isSmallModel ? 0.30 : 0.45));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
-      const charLimit = Math.floor(maxSystemTokens * 3.2);
+      const charLimit = Math.floor(maxSystemTokens * 2.8);
       s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
     }
 
@@ -2657,9 +2660,19 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
-    // Keep visible chat clean: do not inline attachment payloads into user message.
-    // Uploaded docs are already passed through system/document context.
-    const userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    // Build user message content including non-PDF attachment text.
+    // PDFs are injected via buildSystem() → pdfDocs, but text/csv/json/etc. attachments
+    // were silently dropped before — now we inline their content so the model can read them.
+    let userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const nonPdfTextAttachments = attachments.filter(att => !att.isPdf && !att.isImage && att.content);
+    if (nonPdfTextAttachments.length > 0) {
+      const inlined = nonPdfTextAttachments.map(att => {
+        const cap = 32000;
+        const body = att.content.length > cap ? att.content.slice(0, cap) + "\n[...truncated]" : att.content;
+        return `\n\n--- Attached file: ${att.name} ---\n${body}\n--- End of ${att.name} ---`;
+      }).join("");
+      userContent += inlined;
+    }
     const attachmentsMeta = attachments.map(att => ({
       name: att.name,
       isPdf: !!att.isPdf,
@@ -2807,9 +2820,28 @@ Rules:
         mainSystem += `</web_research>`;
       }
 
+      // Build API messages with context budget enforcement.
+      // The latest user message is ALWAYS included — older history is trimmed first.
+      const systemTokens = estimateTokens(mainSystem);
+      const runtimeCtxBudget = runtimeProfile.contextLimit;
+      const generationReserve = Math.floor(runtimeCtxBudget * 0.15);
+      const msgBudget = Math.max(runtimeCtxBudget - systemTokens - generationReserve, Math.floor(runtimeCtxBudget * 0.20));
+
+      // Always keep the latest user message; trim older history to fit budget
+      const mappedMsgs = currentMsgs.map(m => ({ role: m.role, content: m.content }));
+      let includedMsgs = [];
+      let usedMsgTokens = 0;
+      // Walk backwards so the most recent messages (including the user's latest) are kept first
+      for (let i = mappedMsgs.length - 1; i >= 0; i--) {
+        const t = estimateTokens(mappedMsgs[i].content);
+        if (usedMsgTokens + t > msgBudget && includedMsgs.length > 0) break;
+        includedMsgs.unshift(mappedMsgs[i]);
+        usedMsgTokens += t;
+      }
+
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
-        ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+        ...includedMsgs,
       ];
 
       // Stream the main response for real-time display
@@ -3451,7 +3483,7 @@ ${chatHtml}
                 <button onClick={() => { setMemDraft(""); setMem(""); saveVal(MEMORY_STORAGE_KEY, ""); }} style={btn("#cc7777")}>Clear</button>
               </div>
               <div style={{ padding: "6px 12px 8px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {mem.length} chars · ~{Math.ceil(mem.length / 3.8)} tokens · Saved to memory.txt
+                {mem.length} chars · ~{Math.ceil(mem.length / 2.8)} tokens · Saved to memory.txt
               </div>
             </div>
           )}
