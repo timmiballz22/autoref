@@ -3663,7 +3663,7 @@ ${chatHtml}
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block" }} />
+            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block", opacity: isBlinking ? 0.15 : 1, transition: "opacity 0.08s ease" }} />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
             <span style={{ fontSize: "10px", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
               {localModelStatus === "ready"
@@ -3796,7 +3796,7 @@ ${chatHtml}
             </div>
           </div>
 
-          {/* INPUT */}}
+          {/* INPUT */}
           <div style={{ padding: "10px 20px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
             {/* Attachment preview chips */}
             {attachments.length > 0 && (
@@ -3878,8 +3878,8 @@ ${chatHtml}
                         color: "var(--ac)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left", fontWeight: 600,
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(124,224,138,0.06)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(124,224,138,0.06)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCDA"}</span>
                       Upload SMSF Document (PDF)
@@ -3893,8 +3893,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCC4"}</span>
                       Upload File
@@ -3915,8 +3915,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDDBC"}</span>
                       Upload Image
@@ -3926,7 +3926,7 @@ ${chatHtml}
                       onClick={() => {
                         navigator.clipboard.readText().then(text => {
                           if (text && text.trim()) {
-                            setAttachments(prev => prev.length >= 5 ? prev : [...prev, {
+                            setAttachments(prev => prev.length >= 20 ? prev : [...prev, {
                               name: "clipboard.txt",
                               type: "text/plain",
                               content: text.slice(0, 512 * 1024),
@@ -3943,8 +3943,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCCB"}</span>
                       Paste from Clipboard
