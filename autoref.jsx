@@ -567,8 +567,19 @@ async function loadChat() {
   return current || [];
 }
 async function saveChat(msgs) {
-  // Only save user/assistant messages, skip system research messages, cap at 100
-  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
+  // Only save user/assistant messages, skip system research messages, cap at 60.
+  // For user messages with inlined file content, save only the display text —
+  // the full attachment bodies are transient and should not bloat persistent storage
+  // or consume context when reloaded as history.
+  const toSave = msgs
+    .filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:")))
+    .slice(-60)
+    .map(m => {
+      if (m.role === "user" && m.displayContent != null) {
+        return { ...m, content: m.displayContent };
+      }
+      return m;
+    });
   const json = JSON.stringify(toSave);
   // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
@@ -966,11 +977,14 @@ function getDocPages(docText, startPage, endPage) {
   const parts = [];
   for (let p = startPage; p <= endPage; p++) {
     const marker = `=== [Page ${p}] ===`;
-    const nextMarker = `=== [Page ${p + 1}] ===`;
     const startIdx = docText.indexOf(marker);
     if (startIdx < 0) continue;
-    const endIdx = docText.indexOf(nextMarker, startIdx);
-    parts.push(docText.slice(startIdx, endIdx > startIdx ? endIdx : undefined).trim());
+    // Find the NEXT page marker (any page number) to bound this page's content.
+    // Using endPage+1 only works if pages are contiguous — a regex catch-all is safer.
+    const afterMarker = startIdx + marker.length;
+    const nextMatch = docText.slice(afterMarker).search(/=== \[Page \d+\] ===/);
+    const endIdx = nextMatch >= 0 ? afterMarker + nextMatch : undefined;
+    parts.push(docText.slice(startIdx, endIdx).trim());
   }
   return parts.join("\n\n");
 }
@@ -1106,7 +1120,7 @@ const ChatMessage = React.memo(function ChatMessage({ msg }) {
             ))}
           </div>
         )}
-        {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
+        {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.displayContent || msg.content}</div>}
         {msg.role === "assistant" && (
           <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
             <button onClick={() => { try { navigator.clipboard.writeText(msg.content); } catch {} }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.15)", color: "var(--dm)", cursor: "pointer", fontSize: "9px", padding: "2px 6px", borderRadius: "3px", fontFamily: "var(--m)" }}>Copy</button>
@@ -2662,7 +2676,9 @@ Even for simple greetings, update memory with at least the conversation timestam
       pageCount: Number(att.pageCount || 0),
       size: Number(att.size || 0),
     }));
-    const userMsg = { role: "user", content: userContent, attachmentsMeta, _id: nextMsgId() };
+    // Display text is just what the user typed; the full content (with inlined files) goes to the model
+    const displayContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const userMsg = { role: "user", content: userContent, displayContent, attachmentsMeta, _id: nextMsgId() };
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
@@ -2826,9 +2842,6 @@ Rules:
         ...includedMsgs,
       ];
 
-      // Stream the main response for real-time display
-      // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = isSmallModelSend;
       const runtimeCtxMain = runtimeProfile.contextLimit;
       const mainMaxTokens = isSmallModel
@@ -2849,7 +2862,7 @@ Rules:
         setActivityStatus("Cross-reference retry: using already uploaded artifacts...");
         const retryMsgs = [
           { role: "system", content: `${mainSystem}\n\nYou already have the uploaded artifacts in session context. Do NOT ask for links or re-upload. Start the cross-reference now and provide findings.` },
-          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          ...includedMsgs,
         ];
         const { data: retryData } = await callAI(retryMsgs, {
           maxTokens: mainMaxTokens,
@@ -2861,7 +2874,7 @@ Rules:
         setActivityStatus("Cross-reference continuation: extracting concrete findings...");
         const continueMsgs = [
           { role: "system", content: `${mainSystem}\n\nDo the analysis now. Output concrete cross-reference findings with page citations and a discrepancy list.` },
-          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          ...includedMsgs,
           { role: "assistant", content: mainRaw },
           { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
         ];
