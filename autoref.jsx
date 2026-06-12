@@ -263,7 +263,8 @@ function getRuntimeProfile(modelId) {
     contextLimit,
     isSmallModel,
     maxMsgs: lowMemory ? 6 : isSmallModel ? 8 : 16,
-    streamIntervalMs: lowMemory ? 260 : 180,
+    // Each stream tick re-renders the app shell — keep ticks infrequent on weak hardware
+    streamIntervalMs: lowMemory ? 400 : 220,
     planningEnabled: !lowMemory && !isSmallModel,
   };
 }
@@ -377,10 +378,13 @@ function describeLoadError(e) {
   return msg || "Unknown error";
 }
 
-// ─── Estimate token count from text (conservative ~3.2 chars per token to prevent OOM) ───
+// ─── Estimate token count from text ───
+// Use ~2.8 chars/token (more conservative than 3.2) — byte-level BPE tokenizers
+// in small models produce more tokens per character, especially with XML/markdown.
+// Undercounting tokens causes the system prompt to overflow context and starve user messages.
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 3.2);
+  return Math.ceil(text.length / 2.8);
 }
 
 function estimateMessagesTokens(msgs) {
@@ -563,8 +567,19 @@ async function loadChat() {
   return current || [];
 }
 async function saveChat(msgs) {
-  // Only save user/assistant messages, skip system research messages, cap at 100
-  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-60);
+  // Only save user/assistant messages, skip system research messages, cap at 60.
+  // For user messages with inlined file content, save only the display text —
+  // the full attachment bodies are transient and should not bloat persistent storage
+  // or consume context when reloaded as history.
+  const toSave = msgs
+    .filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:")))
+    .slice(-60)
+    .map(m => {
+      if (m.role === "user" && m.displayContent != null) {
+        return { ...m, content: m.displayContent };
+      }
+      return m;
+    });
   const json = JSON.stringify(toSave);
   // Save to BOTH storage backends for redundancy
   try { if (window.storage?.set) await window.storage.set(CHAT_STORAGE_KEY, json); } catch {}
@@ -962,11 +977,14 @@ function getDocPages(docText, startPage, endPage) {
   const parts = [];
   for (let p = startPage; p <= endPage; p++) {
     const marker = `=== [Page ${p}] ===`;
-    const nextMarker = `=== [Page ${p + 1}] ===`;
     const startIdx = docText.indexOf(marker);
     if (startIdx < 0) continue;
-    const endIdx = docText.indexOf(nextMarker, startIdx);
-    parts.push(docText.slice(startIdx, endIdx > startIdx ? endIdx : undefined).trim());
+    // Find the NEXT page marker (any page number) to bound this page's content.
+    // Using endPage+1 only works if pages are contiguous — a regex catch-all is safer.
+    const afterMarker = startIdx + marker.length;
+    const nextMatch = docText.slice(afterMarker).search(/=== \[Page \d+\] ===/);
+    const endIdx = nextMatch >= 0 ? afterMarker + nextMatch : undefined;
+    parts.push(docText.slice(startIdx, endIdx).trim());
   }
   return parts.join("\n\n");
 }
@@ -1102,7 +1120,7 @@ const ChatMessage = React.memo(function ChatMessage({ msg }) {
             ))}
           </div>
         )}
-        {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.content}</div>}
+        {msg.role === "assistant" ? <MemoMd text={msg.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{msg.displayContent || msg.content}</div>}
         {msg.role === "assistant" && (
           <div style={{ display: "flex", gap: "4px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
             <button onClick={() => { try { navigator.clipboard.writeText(msg.content); } catch {} }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.15)", color: "var(--dm)", cursor: "pointer", fontSize: "9px", padding: "2px 6px", borderRadius: "3px", fontFamily: "var(--m)" }}>Copy</button>
@@ -1425,8 +1443,6 @@ function Auto() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
   const [activityStatus, setActivityStatus] = useState("");
-  const [isBlinking, setIsBlinking] = useState(false);
-  const blinkRef = useRef(null);
   const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const scrollRef = useRef(null);
@@ -1631,39 +1647,22 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     };
   }, []);
 
-  // Debounced scroll-into-view to prevent excessive smooth scrolling during streaming
+  // Debounced scroll-into-view. Use instant ("auto") scroll while streaming —
+  // repeated smooth-scroll animations every 150ms force continuous compositing
+  // and are a significant lag source on weak hardware.
   const scrollTimerRef = useRef(null);
   useEffect(() => {
     if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
-      scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollRef.current?.scrollIntoView({ behavior: busyRef.current ? "auto" : "smooth" });
     }, 150);
+    return () => { if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current); };
   }, [msgs, busy, streamingText]);
 
-  // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
-  useEffect(() => {
-    const scheduleBlink = () => {
-      // Inter-blink interval: 2.5–7s random (avg ~4s ≈ 15 blinks/min, natural for screen use)
-      // Slight bias toward shorter intervals to feel alive, occasional long pauses for "focus"
-      const r = Math.random();
-      const delay = r < 0.15
-        ? 1800 + Math.random() * 800   // ~15%: quick double-blink scenario (short gap)
-        : r < 0.85
-          ? 2800 + Math.random() * 3200 // ~70%: normal range 2.8–6s
-          : 5500 + Math.random() * 1800; // ~15%: long focused pause 5.5–7.3s
-      blinkRef.current = setTimeout(() => {
-        setIsBlinking(true);
-        // Blink duration: 120–280ms (human blinks average ~150–250ms)
-        blinkRef.current = setTimeout(() => {
-          setIsBlinking(false);
-          scheduleBlink();
-        }, 120 + Math.random() * 160);
-      }, delay);
-    };
-    // Small initial delay so the avatar doesn't blink immediately on mount
-    blinkRef.current = setTimeout(scheduleBlink, 1200 + Math.random() * 2000);
-    return () => { if (blinkRef.current) clearTimeout(blinkRef.current); };
-  }, []);
+  // ─── Natural blinking — pure CSS animation (zero re-renders) ───
+  // Previously this used setState on a timer, which re-rendered the ENTIRE app
+  // every 2-7 seconds (twice per blink) — a major source of lag on weak hardware.
+  // The CSS `blink` keyframes below reproduce the same visual at zero JS cost.
 
   // ─── Memory helpers ───
   const saveMem = useCallback(() => {
@@ -1985,7 +1984,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     // memory, and the rules file never get injected. Use a lean prompt instead.
     const runtimeProfileCap = getRuntimeProfile(localModelId);
     if (runtimeProfileCap.contextLimit <= 4096) {
-      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.45 * 3.2);
+      const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.30 * 2.8);
       let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
 Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
 `;
@@ -2158,13 +2157,13 @@ Even for simple greetings, update memory with at least the conversation timestam
     s += ``;
 
     // ─── SAFETY CAP: Prevent OOM on weak hardware (iGPU / Acer Aspire 5) ───
-    // Small models (Qwen 0.5B): 35% cap — iGPU can't handle large KV cache
-    // Larger models: 50% cap — leaves room for chat history + generation
-    // Note: runtimeProfileCap is already computed above (compact-path check).
-    const maxSystemTokens = Math.floor(runtimeProfileCap.contextLimit * (runtimeProfileCap.isSmallModel ? 0.35 : 0.50));
+    // Reserve context for: chat messages (30%), generation (15%), safety margin (5%).
+    // System prompt gets the remainder. This ensures user messages are NEVER starved.
+    const contextLimit = runtimeProfileCap.contextLimit;
+    const maxSystemTokens = Math.floor(contextLimit * (runtimeProfileCap.isSmallModel ? 0.30 : 0.45));
     const currentTokens = estimateTokens(s);
     if (currentTokens > maxSystemTokens) {
-      const charLimit = Math.floor(maxSystemTokens * 3.2);
+      const charLimit = Math.floor(maxSystemTokens * 2.8);
       s = s.slice(0, charLimit) + "\n\n[NOTE: Document content was truncated to fit within model context window. Upload fewer documents or use a larger model for full coverage.]";
     }
 
@@ -2657,9 +2656,19 @@ Even for simple greetings, update memory with at least the conversation timestam
     }
     setErr(null); setBusy(true); busyRef.current = true; setActivityStatus(""); setStreamingText("");
 
-    // Keep visible chat clean: do not inline attachment payloads into user message.
-    // Uploaded docs are already passed through system/document context.
-    const userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    // Build user message content including non-PDF attachment text.
+    // PDFs are injected via buildSystem() → pdfDocs, but text/csv/json/etc. attachments
+    // were silently dropped before — now we inline their content so the model can read them.
+    let userContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const nonPdfTextAttachments = attachments.filter(att => !att.isPdf && !att.isImage && att.content);
+    if (nonPdfTextAttachments.length > 0) {
+      const inlined = nonPdfTextAttachments.map(att => {
+        const cap = 32000;
+        const body = att.content.length > cap ? att.content.slice(0, cap) + "\n[...truncated]" : att.content;
+        return `\n\n--- Attached file: ${att.name} ---\n${body}\n--- End of ${att.name} ---`;
+      }).join("");
+      userContent += inlined;
+    }
     const attachmentsMeta = attachments.map(att => ({
       name: att.name,
       isPdf: !!att.isPdf,
@@ -2667,7 +2676,9 @@ Even for simple greetings, update memory with at least the conversation timestam
       pageCount: Number(att.pageCount || 0),
       size: Number(att.size || 0),
     }));
-    const userMsg = { role: "user", content: userContent, attachmentsMeta, _id: nextMsgId() };
+    // Display text is just what the user typed; the full content (with inlined files) goes to the model
+    const displayContent = txt || (attachments.length > 0 ? "Please analyze the uploaded files." : "");
+    const userMsg = { role: "user", content: userContent, displayContent, attachmentsMeta, _id: nextMsgId() };
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
@@ -2807,14 +2818,30 @@ Rules:
         mainSystem += `</web_research>`;
       }
 
+      // Build API messages with context budget enforcement.
+      // The latest user message is ALWAYS included — older history is trimmed first.
+      const systemTokens = estimateTokens(mainSystem);
+      const runtimeCtxBudget = runtimeProfile.contextLimit;
+      const generationReserve = Math.floor(runtimeCtxBudget * 0.15);
+      const msgBudget = Math.max(runtimeCtxBudget - systemTokens - generationReserve, Math.floor(runtimeCtxBudget * 0.20));
+
+      // Always keep the latest user message; trim older history to fit budget
+      const mappedMsgs = currentMsgs.map(m => ({ role: m.role, content: m.content }));
+      let includedMsgs = [];
+      let usedMsgTokens = 0;
+      // Walk backwards so the most recent messages (including the user's latest) are kept first
+      for (let i = mappedMsgs.length - 1; i >= 0; i--) {
+        const t = estimateTokens(mappedMsgs[i].content);
+        if (usedMsgTokens + t > msgBudget && includedMsgs.length > 0) break;
+        includedMsgs.unshift(mappedMsgs[i]);
+        usedMsgTokens += t;
+      }
+
       const mainApiMsgs = [
         { role: "system", content: mainSystem },
-        ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+        ...includedMsgs,
       ];
 
-      // Stream the main response for real-time display
-      // Use conservative max_tokens to prevent GPU OOM on weak hardware
-      const modelDef = LOCAL_MODELS.find(m => m.id === localModelId);
       const isSmallModel = isSmallModelSend;
       const runtimeCtxMain = runtimeProfile.contextLimit;
       const mainMaxTokens = isSmallModel
@@ -2835,7 +2862,7 @@ Rules:
         setActivityStatus("Cross-reference retry: using already uploaded artifacts...");
         const retryMsgs = [
           { role: "system", content: `${mainSystem}\n\nYou already have the uploaded artifacts in session context. Do NOT ask for links or re-upload. Start the cross-reference now and provide findings.` },
-          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          ...includedMsgs,
         ];
         const { data: retryData } = await callAI(retryMsgs, {
           maxTokens: mainMaxTokens,
@@ -2847,7 +2874,7 @@ Rules:
         setActivityStatus("Cross-reference continuation: extracting concrete findings...");
         const continueMsgs = [
           { role: "system", content: `${mainSystem}\n\nDo the analysis now. Output concrete cross-reference findings with page citations and a discrepancy list.` },
-          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          ...includedMsgs,
           { role: "assistant", content: mainRaw },
           { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
         ];
@@ -3451,7 +3478,7 @@ ${chatHtml}
                 <button onClick={() => { setMemDraft(""); setMem(""); saveVal(MEMORY_STORAGE_KEY, ""); }} style={btn("#cc7777")}>Clear</button>
               </div>
               <div style={{ padding: "6px 12px 8px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {mem.length} chars · ~{Math.ceil(mem.length / 3.8)} tokens · Saved to memory.txt
+                {mem.length} chars · ~{Math.ceil(mem.length / 2.8)} tokens · Saved to memory.txt
               </div>
             </div>
           )}
@@ -3663,7 +3690,7 @@ ${chatHtml}
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block" }} />
+            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block", animation: "blink 4.6s ease-in-out infinite" }} />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
             <span style={{ fontSize: "10px", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
               {localModelStatus === "ready"
@@ -3779,7 +3806,9 @@ ${chatHtml}
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                    {/* Plain text during streaming — full markdown re-parse on every chunk
+                        was a major lag source on weak hardware. Final message renders as markdown. */}
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{streamingText}</div>
                   </div>
                 </div>
               )}
@@ -3796,7 +3825,7 @@ ${chatHtml}
             </div>
           </div>
 
-          {/* INPUT */}}
+          {/* INPUT */}
           <div style={{ padding: "10px 20px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
             {/* Attachment preview chips */}
             {attachments.length > 0 && (
@@ -3878,8 +3907,8 @@ ${chatHtml}
                         color: "var(--ac)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left", fontWeight: 600,
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(124,224,138,0.06)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(124,224,138,0.06)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCDA"}</span>
                       Upload SMSF Document (PDF)
@@ -3893,8 +3922,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCC4"}</span>
                       Upload File
@@ -3915,8 +3944,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDDBC"}</span>
                       Upload Image
@@ -3926,7 +3955,7 @@ ${chatHtml}
                       onClick={() => {
                         navigator.clipboard.readText().then(text => {
                           if (text && text.trim()) {
-                            setAttachments(prev => prev.length >= 5 ? prev : [...prev, {
+                            setAttachments(prev => prev.length >= 20 ? prev : [...prev, {
                               name: "clipboard.txt",
                               type: "text/plain",
                               content: text.slice(0, 512 * 1024),
@@ -3943,8 +3972,8 @@ ${chatHtml}
                         color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
                         fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
                       }}
-                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
-                      onMouseLeave={e => e.target.style.background = "transparent"}
+                      onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
                       <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCCB"}</span>
                       Paste from Clipboard
@@ -4005,6 +4034,7 @@ ${chatHtml}
         @keyframes slideR { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
         @keyframes slideL { from{opacity:0;transform:translateX(12px)} to{opacity:1;transform:translateX(0)} }
         @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.85;transform:scale(1.03)} }
+        @keyframes blink { 0%,91%,100%{opacity:1} 93%,96%{opacity:0.15} }
         *{box-sizing:border-box;margin:0}
         ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.05);border-radius:2px}
