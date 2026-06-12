@@ -1158,7 +1158,10 @@ function PdfViewer({ pdfData, blobUrl, onClose, highlights = [], initialPage = 1
         setPdfLoading(true);
         // Destroy previous document before loading a new one
         if (pdfDocRef.current) { try { pdfDocRef.current.destroy(); } catch {} pdfDocRef.current = null; }
-        const loadSource = blobUrl ? { url: blobUrl } : { data: pdfData };
+        // CRITICAL: pass a COPY of the bytes — pdf.js transfers the buffer to its
+        // worker and detaches it, which would break every subsequent viewer open
+        // and the Download button (empty/detached buffer).
+        const loadSource = blobUrl ? { url: blobUrl } : { data: (pdfData && pdfData.slice) ? pdfData.slice() : pdfData };
         const pdf = await pdfjsLib.getDocument(loadSource).promise;
         if (cancelled) return;
         pdfDocRef.current = pdf;
@@ -1468,7 +1471,7 @@ function Auto() {
   const [pdfViewerCrossRefTarget, setPdfViewerCrossRefTarget] = useState(null); // {docName, page, coords, keyword} — cross-ref target in a different doc
   const [docTextViewerOpen, setDocTextViewerOpen] = useState(false); // full extracted text viewer
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
-  const [docTextDraft, setDocTextDraft] = useState("");
+  const [docTextDraft, setDocTextDraft] = useState(null); // null = no edits (show doc text); "" is a valid cleared draft
   const [coordData, setCoordData] = useState({}); // docName -> {blocks: [structuredBlock]}
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
@@ -1496,6 +1499,12 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     const blob = new Blob([html], { type: "text/html" });
     const blobUrl = URL.createObjectURL(blob);
     setExportedArtifacts(prev => {
+      // Revoke the replaced artifact's blob URL — replacing without revoking leaks memory
+      prev.forEach(a => {
+        if (a.kind === "pdf-edit-artifact" && a.sourceDoc === docName) {
+          try { URL.revokeObjectURL(a.blobUrl); } catch {}
+        }
+      });
       const filtered = prev.filter(a => !(a.kind === "pdf-edit-artifact" && a.sourceDoc === docName));
       return [...filtered, {
         id: "pdf-artifact-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
@@ -1607,8 +1616,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     setCrossRefs(refs);
   }, [coordData]);
 
-  // Clear draft text when the user switches to a different document in DocTextViewer
-  useEffect(() => { setDocTextDraft(""); }, [docTextViewerIdx]);
+  // Discard draft when switching documents or opening/closing the text viewer —
+  // otherwise stale edits from a previous session leak into the next view
+  useEffect(() => { setDocTextDraft(null); }, [docTextViewerIdx, docTextViewerOpen]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -1913,6 +1923,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         reader.onload = async () => {
           try {
             const arrayBuffer = reader.result;
+            // Copy the bytes BEFORE extraction — pdf.js transfers the ArrayBuffer
+            // to its worker and detaches it, so reading it afterwards yields an
+            // empty/detached buffer and breaks the PDF viewer + Download button.
+            const pdfBytes = new Uint8Array(arrayBuffer.slice(0));
             setActivityStatus(`Extracting PDF: ${file.name}...`);
             const { text, pageCount, pageImages, blocks } = await extractPdfWithCoords(arrayBuffer, file.name, (current, total) => {
               setActivityStatus(`Extracting PDF "${file.name}": page ${current} of ${total}...`);
@@ -1925,10 +1939,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
                 ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
                 : att
             ));
-            // Store PDF bytes directly for viewer — blob URLs created from another context
-            // are revoked prematurely when React re-runs effects, causing HTTP-0 errors in PDF.js.
-            // Uint8Array keeps the data alive as long as pdfDocs holds the reference.
-            const pdfBytes = new Uint8Array(arrayBuffer);
+            // Store the pre-extraction copy of PDF bytes for the viewer — blob URLs
+            // created from another context are revoked prematurely when React re-runs
+            // effects, causing HTTP-0 errors in PDF.js. Uint8Array keeps data alive.
             setPdfDocs(prev => [...prev, { name: file.name, text, pageCount, pageImages, pdfBytes }]);
             // Register editable text artifact version of the PDF extraction
             createPdfEditArtifact(file.name, text, pageCount);
@@ -2133,7 +2146,10 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 
     // Memory instructions
     if (mem.trim()) {
-      s += `\n\n<memory>\nBelow is your persistent memory (saved to memory.txt and shown in chat). Reference it when relevant. If the user tells you to remember something, include a <memory_update> block at the END of your response with the COMPLETE updated memory content (not a diff).\n${mem}\n</memory>`;
+      // Cap injected memory to the most recent 4000 chars — unbounded memory blobs
+      // crowd out documents and chat history from the context window.
+      const memCapped = mem.length > 4000 ? "[...older memory trimmed...]\n" + mem.slice(-4000) : mem;
+      s += `\n\n<memory>\nBelow is your persistent memory (saved to memory.txt and shown in chat). Reference it when relevant. If the user tells you to remember something, include a <memory_update> block at the END of your response with the COMPLETE updated memory content (not a diff).\n${memCapped}\n</memory>`;
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
@@ -2794,10 +2810,8 @@ Rules:
       setActivityStatus(isCrossRefTask
         ? "Cross-referencing uploaded documents..."
         : (reviewerFindings.length > 0 ? "Main agent synthesising research..." : "Thinking..."));
-      if (isCrossRefTask) {
-        setArtifactsOpen(true);
-        if (pdfDocs.length > 0) { setPdfViewerIdx(0); setPdfViewerOpen(true); }
-      }
+      // NOTE: do not auto-open the PDF viewer/artifacts panel here — modals opening
+      // over the chat hid the streaming response and broke the reading flow.
 
       if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
 
@@ -2835,6 +2849,12 @@ Rules:
         if (usedMsgTokens + t > msgBudget && includedMsgs.length > 0) break;
         includedMsgs.unshift(mappedMsgs[i]);
         usedMsgTokens += t;
+      }
+      // Chat templates expect history to start with a user turn. If trimming cut
+      // the conversation mid-pair (leading assistant message), drop it — an
+      // orphaned assistant turn confuses the model about who said what and when.
+      while (includedMsgs.length > 1 && includedMsgs[0].role !== "user") {
+        includedMsgs.shift();
       }
 
       const mainApiMsgs = [
@@ -3028,13 +3048,11 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
         currentMsgs = [...currentMsgs, { role: "assistant", content: displayText + `\n\n---\n*Memory updated and saved to memory.txt*`, _id: nextMsgId() }];
       } else {
         currentMsgs = [...currentMsgs, { role: "assistant", content: displayText, _id: nextMsgId() }];
-        const currentMem = memRef.current;
-        const autoMemory = currentMem.trim()
-          ? currentMem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`
-          : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Auto responded about: ${displayText.slice(0, 200)}`;
-        setMem(autoMemory);
-        setMemDraft(autoMemory);
-        saveVal(MEMORY_STORAGE_KEY, autoMemory);
+        // NOTE: do NOT auto-append transcript snippets to memory here.
+        // That previously caused stale/deleted chat fragments to accumulate in
+        // memory forever and get re-injected into the system prompt out of order,
+        // confusing the model about the conversation sequence. Memory now changes
+        // only via explicit <memory_update> from the model or manual edits.
       }
 
       setMsgs([...currentMsgs]);
@@ -3286,14 +3304,22 @@ ${chatHtml}
               </span>
             </div>
             <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-              <button onClick={() => { navigator.clipboard.writeText(docTextDraft || pdfDocs[docTextViewerIdx].text); }} style={{ ...btn("#88bbcc") }}>Copy All</button>
+              {docTextDraft != null && docTextDraft !== pdfDocs[docTextViewerIdx].text && (
+                <span style={{ fontSize: "9px", color: "#cc9955", fontFamily: "var(--m)", padding: "1px 6px", borderRadius: "3px", background: "rgba(204,153,85,0.08)", border: "1px solid rgba(204,153,85,0.2)" }}>unsaved edits</span>
+              )}
+              <button onClick={() => { try { navigator.clipboard.writeText(docTextDraft ?? pdfDocs[docTextViewerIdx].text); } catch {} }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
                 const idx = docTextViewerIdx;
-                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: (docTextDraft || d.text) } : d));
+                const doc = pdfDocs[idx];
+                const newText = docTextDraft ?? doc.text;
+                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: newText } : d));
+                // Refresh the editable artifact so it reflects the saved edits
+                createPdfEditArtifact(doc.name, newText, doc.pageCount);
+                setDocTextDraft(null); // edits are now the doc text — clear draft state
               }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
-              <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft || pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
+              <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft ?? pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
               <button onClick={() => {
-                const blob = new Blob([docTextDraft || pdfDocs[docTextViewerIdx].text], { type: "text/plain" });
+                const blob = new Blob([docTextDraft ?? pdfDocs[docTextViewerIdx].text], { type: "text/plain" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
@@ -3301,12 +3327,12 @@ ${chatHtml}
                 document.body.appendChild(a); a.click(); document.body.removeChild(a);
                 setTimeout(() => URL.revokeObjectURL(url), 5000);
               }} style={{ ...btn("#7ce08a") }}>Download .txt</button>
-              <button onClick={() => { setDocTextViewerOpen(false); setDocTextDraft(""); }} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px" }}>×</button>
+              <button onClick={() => { setDocTextViewerOpen(false); setDocTextDraft(null); }} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "20px", padding: "0 4px" }}>×</button>
             </div>
           </div>
           <div style={{ flex: 1, overflow: "auto", padding: "16px 20px" }}>
             <textarea
-              value={docTextDraft || pdfDocs[docTextViewerIdx].text}
+              value={docTextDraft ?? pdfDocs[docTextViewerIdx].text}
               onChange={e => setDocTextDraft(e.target.value)}
               style={{ width: "100%", height: "100%", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--m)", fontSize: "12px", color: "var(--tx)", lineHeight: 1.7, margin: 0, background: "#0a0a12", border: "1px solid #1d1d28", borderRadius: "8px", padding: "12px", outline: "none", resize: "none" }}
             />
@@ -3391,6 +3417,12 @@ ${chatHtml}
                           )}
                           <button onClick={() => {
                             const docName = doc.name;
+                            // Close viewers pointing at this doc (or clamp indices) —
+                            // removal shifts array indices and could show the wrong document
+                            if (pdfViewerIdx === i) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }
+                            else if (pdfViewerIdx > i) setPdfViewerIdx(v => v - 1);
+                            if (docTextViewerIdx === i) { setDocTextViewerOpen(false); setDocTextDraft(null); }
+                            else if (docTextViewerIdx > i) setDocTextViewerIdx(v => v - 1);
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
                             setAttachments(prev => prev.filter(a => a.name !== docName));
                             setCoordData(prev => { const n = { ...prev }; delete n[docName]; return n; });
@@ -3729,15 +3761,14 @@ ${chatHtml}
             <button
               onClick={() => {
                 if (pdfDocs.length > 0) {
-                  setPdfViewerIdx(0);
-                  setPdfViewerHighlights([]);
-                  setPdfViewerInitPage(1);
-                  setPdfViewerOpen(true);
-                  setArtifactsOpen(true);
+                  setDocTextViewerIdx(0);
+                  setDocTextViewerOpen(true);
+                } else {
+                  setErr("Upload a PDF first to use the PDF editor (use the + button below).");
                 }
               }}
               style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: pdfDocs.length > 0 ? "var(--ac2)" : "var(--dm)", opacity: pdfDocs.length > 0 ? 1 : 0.6 }}
-              title="Open PDF text editor/viewer tool"
+              title="Open PDF text editor — view and edit extracted document text"
             >PDF Editor</button>
             {pdfDocs.length >= 2 && (
               <button
