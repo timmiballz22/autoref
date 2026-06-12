@@ -263,7 +263,8 @@ function getRuntimeProfile(modelId) {
     contextLimit,
     isSmallModel,
     maxMsgs: lowMemory ? 6 : isSmallModel ? 8 : 16,
-    streamIntervalMs: lowMemory ? 260 : 180,
+    // Each stream tick re-renders the app shell — keep ticks infrequent on weak hardware
+    streamIntervalMs: lowMemory ? 400 : 220,
     planningEnabled: !lowMemory && !isSmallModel,
   };
 }
@@ -1428,8 +1429,6 @@ function Auto() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
   const [activityStatus, setActivityStatus] = useState("");
-  const [isBlinking, setIsBlinking] = useState(false);
-  const blinkRef = useRef(null);
   const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const scrollRef = useRef(null);
@@ -1634,39 +1633,22 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     };
   }, []);
 
-  // Debounced scroll-into-view to prevent excessive smooth scrolling during streaming
+  // Debounced scroll-into-view. Use instant ("auto") scroll while streaming —
+  // repeated smooth-scroll animations every 150ms force continuous compositing
+  // and are a significant lag source on weak hardware.
   const scrollTimerRef = useRef(null);
   useEffect(() => {
     if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     scrollTimerRef.current = setTimeout(() => {
-      scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollRef.current?.scrollIntoView({ behavior: busyRef.current ? "auto" : "smooth" });
     }, 150);
+    return () => { if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current); };
   }, [msgs, busy, streamingText]);
 
-  // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
-  useEffect(() => {
-    const scheduleBlink = () => {
-      // Inter-blink interval: 2.5–7s random (avg ~4s ≈ 15 blinks/min, natural for screen use)
-      // Slight bias toward shorter intervals to feel alive, occasional long pauses for "focus"
-      const r = Math.random();
-      const delay = r < 0.15
-        ? 1800 + Math.random() * 800   // ~15%: quick double-blink scenario (short gap)
-        : r < 0.85
-          ? 2800 + Math.random() * 3200 // ~70%: normal range 2.8–6s
-          : 5500 + Math.random() * 1800; // ~15%: long focused pause 5.5–7.3s
-      blinkRef.current = setTimeout(() => {
-        setIsBlinking(true);
-        // Blink duration: 120–280ms (human blinks average ~150–250ms)
-        blinkRef.current = setTimeout(() => {
-          setIsBlinking(false);
-          scheduleBlink();
-        }, 120 + Math.random() * 160);
-      }, delay);
-    };
-    // Small initial delay so the avatar doesn't blink immediately on mount
-    blinkRef.current = setTimeout(scheduleBlink, 1200 + Math.random() * 2000);
-    return () => { if (blinkRef.current) clearTimeout(blinkRef.current); };
-  }, []);
+  // ─── Natural blinking — pure CSS animation (zero re-renders) ───
+  // Previously this used setState on a timer, which re-rendered the ENTIRE app
+  // every 2-7 seconds (twice per blink) — a major source of lag on weak hardware.
+  // The CSS `blink` keyframes below reproduce the same visual at zero JS cost.
 
   // ─── Memory helpers ───
   const saveMem = useCallback(() => {
@@ -3695,7 +3677,7 @@ ${chatHtml}
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block", opacity: isBlinking ? 0.15 : 1, transition: "opacity 0.08s ease" }} />
+            <span style={{ width: "12px", height: "12px", borderRadius: "999px", background: "var(--ac)", display: "inline-block", animation: "blink 4.6s ease-in-out infinite" }} />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Auto</span>
             <span style={{ fontSize: "10px", color: localModelStatus === "ready" ? "var(--ac)" : "var(--dm)", fontFamily: "var(--m)" }}>
               {localModelStatus === "ready"
@@ -3811,7 +3793,9 @@ ${chatHtml}
                 <div style={{ alignSelf: "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start" }}>
                   <span style={{ width: "10px", height: "10px", borderRadius: "999px", background: "var(--ac)", flexShrink: 0, marginTop: "8px" }} />
                   <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0, opacity: 0.85 }}>
-                    <MemoMd text={streamingText} />
+                    {/* Plain text during streaming — full markdown re-parse on every chunk
+                        was a major lag source on weak hardware. Final message renders as markdown. */}
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{streamingText}</div>
                   </div>
                 </div>
               )}
@@ -4037,6 +4021,7 @@ ${chatHtml}
         @keyframes slideR { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
         @keyframes slideL { from{opacity:0;transform:translateX(12px)} to{opacity:1;transform:translateX(0)} }
         @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.85;transform:scale(1.03)} }
+        @keyframes blink { 0%,91%,100%{opacity:1} 93%,96%{opacity:0.15} }
         *{box-sizing:border-box;margin:0}
         ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.05);border-radius:2px}
