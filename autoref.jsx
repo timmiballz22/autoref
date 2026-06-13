@@ -1530,6 +1530,8 @@ function Auto() {
   const memRef = useRef("");
   const busyRef = useRef(false);
   const localEngineRef = useRef(null);
+  const pdfDocNamesRef = useRef(new Set());   // names of loaded docs (dedup)
+  const loadingNamesRef = useRef(new Set());  // names of in-flight PDF extractions (dedup)
   const [localModelId, setLocalModelId] = useState(LOCAL_MODELS[0].id);
   // idle | cached | downloading | loading | ready | error | exportDone
   const [localModelStatus, setLocalModelStatus] = useState("idle");
@@ -1679,6 +1681,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
       allArtifactUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
     };
   }, []);
+
+  // Keep a fast lookup of loaded document names for upload de-duplication
+  useEffect(() => { pdfDocNamesRef.current = new Set(pdfDocs.map(d => d.name)); }, [pdfDocs]);
 
   // Auto-rebuild cross-reference index whenever documents change
   // Requires at least 2 docs; clears refs when fewer than 2 are loaded
@@ -1981,8 +1986,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 
       if (isPdf) {
+        // Dedup: skip a PDF whose name is already loaded or currently extracting.
+        // Everything (pdfDocs, coordData, artifacts, Remove) is keyed by name, so a
+        // duplicate name corrupts indexing and makes removal delete both copies.
+        if (pdfDocNamesRef.current.has(file.name) || loadingNamesRef.current.has(file.name)) {
+          setErr(`"${file.name}" is already loaded. Remove it first to re-upload a changed version.`);
+          return;
+        }
+        loadingNamesRef.current.add(file.name);
         // PDF: show immediate placeholder chip so user sees the file was accepted
-        const placeholderId = `pdf-loading-${Date.now()}-${file.name}`;
+        const placeholderId = `pdf-loading-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${file.name}`;
         setAttachments(prev => {
           if (prev.length >= MAX_ATTACHMENTS) return prev;
           return [...prev, { name: file.name, type: "application/pdf", content: "", size: file.size, isPdf: true, pageCount: 0, pageImages: [], _loading: true, _id: placeholderId }];
@@ -2024,6 +2037,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             setCoordData(prev => ({ ...prev, [file.name]: { blocks: structuredBlocks } }));
             // Remove from loading tracker
             setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+            loadingNamesRef.current.delete(file.name);
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
@@ -2031,7 +2045,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             // Remove the loading placeholder on failure
             setAttachments(prev => prev.filter(att => att._id !== placeholderId));
             setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+            loadingNamesRef.current.delete(file.name);
           }
+        };
+        reader.onerror = () => {
+          setErr(`Could not read "${file.name}". Try again.`);
+          setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+          setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+          loadingNamesRef.current.delete(file.name);
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
