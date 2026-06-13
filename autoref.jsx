@@ -3406,23 +3406,28 @@ ${chatHtml}
     if (!doc) return;
     const safeName = String(doc.name || "document.pdf").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const rawText = String(doc.text || "");
-    const body = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    const regenKind = format === "txt" ? "regen-txt" : "regen-html";
+    const revokeOld = (prev) => {
+      prev.forEach(a => { if (a.kind === regenKind && a.sourceDoc === doc.name) try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+      return prev.filter(a => !(a.kind === regenKind && a.sourceDoc === doc.name));
+    };
     if (format === "txt") {
       const txtBlob = new Blob([rawText], { type: "text/plain" });
       const txtUrl = URL.createObjectURL(txtBlob);
       const txtName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.txt";
-      setExportedArtifacts(prev => [...prev, { id: "regen-txt-" + Date.now(), name: txtName, type: "text/plain", blobUrl: txtUrl, size: txtBlob.size, timestamp: new Date() }]);
+      setExportedArtifacts(prev => [...revokeOld(prev), { id: "regen-txt-" + Date.now(), name: txtName, type: "text/plain", blobUrl: txtUrl, size: txtBlob.size, timestamp: new Date(), kind: regenKind, sourceDoc: doc.name }]);
       try { window.open(txtUrl, "_blank"); } catch {}
       setArtifactsOpen(true);
       return;
     }
+    const body = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${safeName} - Regenerated Artifact</title>
 <style>body{font-family:system-ui,sans-serif;margin:18px;line-height:1.5} .meta{font-size:12px;color:#666;margin-bottom:10px;border-bottom:1px solid #ddd;padding-bottom:8px}</style>
 </head><body><h2>${safeName} — Regenerated Artifact</h2><div class="meta">Pages: ${doc.pageCount || 0} · Generated: ${new Date().toLocaleString()}</div><div>${body}</div></body></html>`;
     const artifactBlob = new Blob([html], { type: "text/html" });
     const artifactUrl = URL.createObjectURL(artifactBlob);
     const artifactName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.html";
-    setExportedArtifacts(prev => [...prev, { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
+    setExportedArtifacts(prev => [...revokeOld(prev), { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date(), kind: regenKind, sourceDoc: doc.name }]);
     try { window.open(artifactUrl, "_blank"); } catch {}
     setArtifactsOpen(true);
   }, []);
@@ -3470,9 +3475,15 @@ ${chatHtml}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "#0d0d14", borderBottom: "1px solid var(--bd)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
               <span style={{ fontSize: "14px" }}>{"\uD83D\uDCDA"}</span>
+              {pdfDocs.length > 1 && (
+                <button onClick={() => { setDocTextDraft(null); setDocTextViewerIdx(v => (v - 1 + pdfDocs.length) % pdfDocs.length); }} style={{ background: "none", border: "1px solid var(--bd)", color: "var(--ac2)", cursor: "pointer", fontSize: "14px", padding: "0 6px", borderRadius: "4px", lineHeight: "20px" }} title="Previous document">{"\u2039"}</button>
+              )}
               <span style={{ fontWeight: 700, fontSize: "14px", color: "var(--ac2)" }}>{pdfDocs[docTextViewerIdx].name}</span>
+              {pdfDocs.length > 1 && (
+                <button onClick={() => { setDocTextDraft(null); setDocTextViewerIdx(v => (v + 1) % pdfDocs.length); }} style={{ background: "none", border: "1px solid var(--bd)", color: "var(--ac2)", cursor: "pointer", fontSize: "14px", padding: "0 6px", borderRadius: "4px", lineHeight: "20px" }} title="Next document">{"\u203A"}</button>
+              )}
               <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {pdfDocs[docTextViewerIdx].pageCount} pages · {(pdfDocs[docTextViewerIdx].text.length / 1024).toFixed(0)}KB text · ~{estimateTokens(pdfDocs[docTextViewerIdx].text).toLocaleString()} tokens
+                {pdfDocs.length > 1 ? `(${docTextViewerIdx + 1}/${pdfDocs.length}) ` : ""}{pdfDocs[docTextViewerIdx].pageCount} pages · {(pdfDocs[docTextViewerIdx].text.length / 1024).toFixed(0)}KB text · ~{estimateTokens(pdfDocs[docTextViewerIdx].text).toLocaleString()} tokens
               </span>
             </div>
             <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
@@ -3482,12 +3493,14 @@ ${chatHtml}
               <button onClick={() => { try { navigator.clipboard.writeText(docTextDraft ?? pdfDocs[docTextViewerIdx].text); } catch {} }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
                 const idx = docTextViewerIdx;
-                const doc = pdfDocs[idx];
-                const newText = docTextDraft ?? doc.text;
-                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: newText } : d));
-                // Refresh the editable artifact so it reflects the saved edits
-                createPdfEditArtifact(doc.name, newText, doc.pageCount);
-                setDocTextDraft(null); // edits are now the doc text — clear draft state
+                setPdfDocs(prev => {
+                  const doc = prev[idx];
+                  if (!doc) return prev;
+                  const newText = docTextDraft ?? doc.text;
+                  createPdfEditArtifact(doc.name, newText, doc.pageCount);
+                  return prev.map((d, i) => i === idx ? { ...d, text: newText } : d);
+                });
+                setDocTextDraft(null);
               }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
               <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft ?? pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
               <button onClick={() => {
@@ -3589,19 +3602,18 @@ ${chatHtml}
                           )}
                           <button onClick={() => {
                             const docName = doc.name;
-                            // Close viewers pointing at this doc (or clamp indices) —
-                            // removal shifts array indices and could show the wrong document
+                            const newLen = pdfDocs.length - 1;
                             if (pdfViewerIdx === i) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }
-                            else if (pdfViewerIdx > i) setPdfViewerIdx(v => v - 1);
+                            else if (pdfViewerIdx > i) setPdfViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             if (docTextViewerIdx === i) { setDocTextViewerOpen(false); setDocTextDraft(null); }
-                            else if (docTextViewerIdx > i) setDocTextViewerIdx(v => v - 1);
+                            else if (docTextViewerIdx > i) setDocTextViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
                             setAttachments(prev => prev.filter(a => a.name !== docName));
                             setCoordData(prev => { const n = { ...prev }; delete n[docName]; return n; });
                             setExportedArtifacts(prev => {
-                              const removed = prev.filter(a => a.kind === "pdf-edit-artifact" && a.sourceDoc === docName);
+                              const removed = prev.filter(a => a.sourceDoc === docName);
                               removed.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
-                              return prev.filter(a => !(a.kind === "pdf-edit-artifact" && a.sourceDoc === docName));
+                              return prev.filter(a => a.sourceDoc !== docName);
                             });
                           }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
                         </div>
@@ -3933,7 +3945,7 @@ ${chatHtml}
             <button
               onClick={() => {
                 if (pdfDocs.length > 0) {
-                  setDocTextViewerIdx(0);
+                  setDocTextViewerIdx(prev => Math.min(prev, pdfDocs.length - 1));
                   setDocTextViewerOpen(true);
                 } else {
                   setErr("Upload a PDF first to use the PDF editor (use the + button below).");
