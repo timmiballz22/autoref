@@ -325,7 +325,14 @@ function looksLikeCrossRefNonAnswer(text) {
   if (!t.trim()) return true;
   const genericAck = /i will|i can|i'm ready|certainly|understood|please provide|please share|upload/i.test(t);
   const hasFindingsSignals = /mismatch|difference|discrep|reference|page\s+\d+|finding|evidence|comparison/i.test(t);
-  return genericAck && !hasFindingsSignals;
+  if (genericAck && !hasFindingsSignals) return true;
+  // Shallow answer: only mentions page 1 or has very few page citations (< 3 unique pages)
+  const pageCites = t.match(/page\s+(\d+)/gi) || [];
+  const uniquePages = new Set(pageCites.map(p => p.match(/\d+/)[0]));
+  if (pageCites.length > 0 && uniquePages.size < 3 && t.length < 1500) return true;
+  // Too short to be a real cross-reference
+  if (t.length < 400) return true;
+  return false;
 }
 
 function buildPdfToolResults(query, pdfDocs, maxHits = 8) {
@@ -2072,6 +2079,8 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 5. **Compliance Checklist**: For each document, note any SIS Act requirements that appear unmet
 6. **Discrepancy Register**: Explicitly list ALL discrepancies found between documents in a dedicated section
 
+**CRITICAL — DEPTH REQUIREMENT**: You MUST analyse content from THROUGHOUT each document, NOT just the first page. Scan and cite content from beginning, middle, and end pages. A shallow answer that only mentions page 1 is UNACCEPTABLE. Reference at least 5+ different pages per document when possible. Cover key clauses, financial figures, member details, compliance items, and governance provisions found on various pages.
+
 ### Response Structure for Document Analysis:
 1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
 2. **Key Findings**: Major observations with page citations
@@ -2893,7 +2902,7 @@ Rules:
       if (isCrossRefTask && looksLikeCrossRefNonAnswer(mainRaw)) {
         setActivityStatus("Cross-reference continuation: extracting concrete findings...");
         const continueMsgs = [
-          { role: "system", content: `${mainSystem}\n\nDo the analysis now. Output concrete cross-reference findings with page citations and a discrepancy list.` },
+          { role: "system", content: `${mainSystem}\n\nDo the analysis NOW. Output concrete cross-reference findings with page citations from THROUGHOUT each document (not just page 1). Include a discrepancy list. Reference at least 5 different pages per document. Cover financials, compliance, governance, and member details.` },
           ...includedMsgs,
           { role: "assistant", content: mainRaw },
           { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
@@ -3057,6 +3066,65 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
 
       setMsgs([...currentMsgs]);
       saveChat(currentMsgs);
+
+      // ─── Auto-create cross-reference artifact when analysis completes ───
+      if (isCrossRefTask && displayText.length > 200) {
+        const docNames = pdfDocs.map(d => d.name).join(", ") || "None";
+        const timestamp = new Date().toLocaleString("en-AU", { dateStyle: "full", timeStyle: "short" });
+        const modelName = LOCAL_MODELS.find(m => m.id === localModelId)?.name || localModelId;
+        const toHtml = (text) => {
+          if (!text) return "";
+          return text
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/\*\*\[([^\]]+)\]\*\*/g, '<strong style="color:#1a5276">[$1]</strong>')
+            .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+            .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+            .replace(/`([^`]+)`/g, '<code style="background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:0.9em">$1</code>')
+            .replace(/^### (.+)$/gm, '<h4 style="color:#2c3e50;margin:16px 0 6px;font-size:14px">$1</h4>')
+            .replace(/^## (.+)$/gm, '<h3 style="color:#2c3e50;margin:18px 0 8px;font-size:16px">$1</h3>')
+            .replace(/^# (.+)$/gm, '<h2 style="color:#1a5276;margin:20px 0 10px;font-size:18px">$1</h2>')
+            .replace(/^---+$/gm, '<hr style="border:none;border-top:1px solid #ccc;margin:12px 0">')
+            .replace(/^[\-\*] (.+)$/gm, '<div style="display:flex;gap:6px;margin:2px 0"><span style="color:#2980b9">•</span><span>$1</span></div>')
+            .replace(/\n\n/g, "</p><p>")
+            .replace(/\n/g, "<br>");
+        };
+        const xrefHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cross-Reference Analysis — Auto</title>
+<style>
+  @page { size: A4; margin: 20mm 15mm; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; color: #222; max-width: 800px; margin: 0 auto; padding: 20px; font-size: 13px; line-height: 1.6; }
+  h1 { color: #1a5276; font-size: 22px; margin-bottom: 4px; }
+  .meta { color: #666; font-size: 11px; margin-bottom: 16px; border-bottom: 2px solid #2980b9; padding-bottom: 10px; }
+  .disclaimer { background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #856404; margin: 16px 0; }
+  .content { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; line-height: 1.7; }
+  .footer { text-align: center; color: #999; font-size: 10px; margin-top: 30px; border-top: 1px solid #eee; padding-top: 10px; }
+</style></head><body>
+<h1>SMSF Cross-Reference Analysis</h1>
+<div class="meta">
+  <strong>Generated:</strong> ${timestamp}<br>
+  <strong>Documents analysed:</strong> ${docNames}<br>
+  <strong>Model:</strong> ${modelName} (Offline local analysis)
+</div>
+<div class="disclaimer">
+  <strong>Disclaimer:</strong> This report was generated by an AI assistant running locally on your device. It is intended as a working aid only and does not constitute financial, legal, or tax advice. All findings should be verified by a qualified SMSF auditor or professional adviser.
+</div>
+<div class="content"><p>${toHtml(displayText)}</p></div>
+<div class="footer">Generated by Auto — Australian SMSF Document Cross-Reference Agent</div>
+</body></html>`;
+        const xrefBlob = new Blob([xrefHtml], { type: "text/html" });
+        const xrefUrl = URL.createObjectURL(xrefBlob);
+        const xrefName = `Cross-Reference-${new Date().toISOString().slice(0,10)}.html`;
+        setExportedArtifacts(prev => [...prev, {
+          id: "xref-" + Date.now(),
+          name: xrefName,
+          type: "text/html",
+          blobUrl: xrefUrl,
+          size: xrefBlob.size,
+          timestamp: new Date(),
+          kind: "cross-ref-artifact",
+        }]);
+        setArtifactsOpen(true);
+      }
 
     } catch (e) {
       if (e.name !== "AbortError") {
