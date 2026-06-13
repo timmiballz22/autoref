@@ -323,15 +323,19 @@ function looksLikeCrossRefTask(text) {
 function looksLikeCrossRefNonAnswer(text) {
   const t = String(text || "").toLowerCase();
   if (!t.trim()) return true;
-  const genericAck = /i will|i can|i'm ready|certainly|understood|please provide|please share|upload/i.test(t);
-  const hasFindingsSignals = /mismatch|difference|discrep|reference|page\s+\d+|finding|evidence|comparison/i.test(t);
-  if (genericAck && !hasFindingsSignals) return true;
-  // Shallow answer: only mentions page 1 or has very few page citations (< 3 unique pages)
+  // A real cross-reference analysis MUST contain actual page citations.
+  // Zero page citations = the model is planning/acknowledging, not analysing.
   const pageCites = t.match(/page\s+(\d+)/gi) || [];
+  if (pageCites.length === 0) return true;
+  // Only references a single page (likely just page 1) and is short
   const uniquePages = new Set(pageCites.map(p => p.match(/\d+/)[0]));
-  if (pageCites.length > 0 && uniquePages.size < 3 && t.length < 1500) return true;
-  // Too short to be a real cross-reference
-  if (t.length < 400) return true;
+  if (uniquePages.size < 2 && t.length < 1500) return true;
+  // Planning/intent language with no substance: "I will compare", "First I will extract"
+  const planningIntent = /\b(i will|i can|i'm going to|let me|first,?\s+i|then,?\s+i|once i have)\b/i.test(t);
+  const hasConcreteData = /\*\*\[.*page\s+\d+/i.test(t) || /\bpage\s+\d+\b.*\bpage\s+\d+\b/i.test(t);
+  if (planningIntent && !hasConcreteData) return true;
+  // Too short to be a real cross-reference analysis
+  if (t.length < 600) return true;
   return false;
 }
 
@@ -2925,19 +2929,18 @@ Rules:
         mainRaw = extractRaw(retryData);
       }
       if (isCrossRefTask && looksLikeCrossRefNonAnswer(mainRaw)) {
-        setActivityStatus("Cross-reference continuation: extracting concrete findings...");
-        const continueMsgs = [
-          { role: "system", content: `${mainSystem}\n\nDo the analysis NOW. Output concrete cross-reference findings with page citations from THROUGHOUT each document (not just page 1). Include a discrepancy list. Reference at least 5 different pages per document. Cover financials, compliance, governance, and member details.` },
+        setActivityStatus("Cross-reference retry: forcing structured analysis...");
+        const docList = pdfDocs.map(d => `"${d.name}" (${d.pageCount} pages)`).join(" and ");
+        const forceMsgs = [
+          { role: "system", content: `${mainSystem}\n\nCRITICAL: You MUST output the cross-reference analysis RIGHT NOW. Do NOT plan, do NOT say "I will". Start directly with "## 1. Document Summary" and work through all 7 sections. The documents ${docList} are already loaded above — analyse them.` },
           ...includedMsgs,
-          { role: "assistant", content: mainRaw },
-          { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
         ];
-        const { data: continueData } = await callAI(continueMsgs, {
+        const { data: forceData } = await callAI(forceMsgs, {
           maxTokens: mainMaxTokens,
           timeoutMs: 180000,
         });
-        const continued = extractRaw(continueData);
-        if (continued) mainRaw = continued;
+        const forced = extractRaw(forceData);
+        if (forced && !looksLikeCrossRefNonAnswer(forced)) mainRaw = forced;
       }
       setStreamingText(""); // Clear streaming display
 
