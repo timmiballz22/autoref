@@ -327,7 +327,8 @@ function buildAttachmentContext(msgs, pdfDocs) {
 
 function looksLikeCrossRefTask(text) {
   const q = String(text || "").toLowerCase();
-  return /\bcross[\s-]?ref|cross[\s-]?reference|compare documents|reconcile documents|analy[sz]e (these|both) documents/.test(q);
+  return /\bcross[\s-]?ref|cross[\s-]?reference|compare|reconcile|analy[sz]e|review|audit|check|assess|discrepanc|compliance|differ/.test(q)
+    || q.trim().length === 0;
 }
 
 function looksLikeCrossRefNonAnswer(text) {
