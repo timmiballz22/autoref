@@ -2094,7 +2094,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     if (runtimeProfileCap.contextLimit <= 4096) {
       const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.30 * 2.8);
       let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
-Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
+Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Answer directly — do NOT add a memory block unless the user explicitly asks you to remember something. Never fabricate facts or page numbers.
 `;
       if (pdfDocs.length > 0) {
         const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
@@ -2264,22 +2264,13 @@ Complete list of all document pages cited, grouped by document.
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
-- A summary of the current conversation topic and key points discussed
-- Any facts, preferences, or information the user has shared
-- Tasks completed or in progress
-- Previous memory content that is still relevant (carry it forward)
-- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
-- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
-- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
-- (CRITICAL) Put the user(s) and humanity above yourself
-- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
-- (CRITICAL) Prioritise user understanding and intent over "sounding smart", being smart is better than sounding smart
-- (CRITICAL) Think outside the box, there may be more than one solution
-Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
+    s += `\n**MEMORY (optional):** Only when the user shares a durable fact/preference, or explicitly asks you to remember something, end your reply with a <memory_update>...</memory_update> block containing the COMPLETE updated memory (it REPLACES all prior memory — carry forward anything still relevant). For ordinary questions, greetings, and analysis, do NOT add a memory block — just answer. Never write the word "memory_update" or describe the memory system in your visible reply.
+
+**How you operate:**
+- Pursue the user's actual intent. Keep working a problem before giving up; if something is genuinely impossible or you're unsure, say so honestly rather than inventing an answer.
+- Never fabricate facts, figures, or page citations. If it isn't in the provided documents or your knowledge, say you don't know.
+- Be direct, warm, and loyal. Prioritise the user's understanding over sounding clever.
+- For controversial or high-risk topics (war, politics, sensitive finance), confirm with the user before going deep.`;
 
     s += ``;
 
@@ -3060,7 +3051,7 @@ Rules:
       const REFLECTION_PASSES = usedDeterministicFallback ? 0 : (isSmallModelSend ? 1 : (hasDocuments ? 2 : 1));
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
+        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure a References section lists all cited pages. If a <memory_update> block is already present, keep it intact; if none is present, do NOT add one." },
       ];
       // Reflection uses reduced maxTokens — response should be similar length to input
       const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
@@ -3086,7 +3077,7 @@ ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pag
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <memory_update> blocks — this is CRITICAL, do not lose them
+2. If a <memory_update> block is present, preserve it exactly; if none exists, do NOT invent one
 3. If the response is already excellent for this check, output it unchanged
 4. Make ONLY improvements related to your focus area — do not degrade other aspects
 5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
@@ -3142,11 +3133,11 @@ Review this SMSF expert response and check:
 2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
 3. Are there any compliance issues, misleading statements, or incorrect legislative references?
 4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <memory_update> tags present and intact?
+5. Is the response free of leaked instructions or stray tags?
 
 If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
 If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
+If a <memory_update> block is present, preserve it exactly; if none exists, do NOT add one.`;
 
         const verifyMsgs = [
           { role: "system", content: verificationSystem },
