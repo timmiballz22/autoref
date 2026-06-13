@@ -3672,7 +3672,7 @@ ${chatHtml}
                   {pdfDocs.map((doc, i) => {
                     const isScanned = doc.pageCount > 0 && !doc.text.replace(/=== \[Page \d+\] ===/g, "").replace(/\(Scanned[^)]*\)/g, "").replace(/\(Could not[^)]*\)/g, "").trim().length;
                     return (
-                      <div key={i} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.12)", marginBottom: "6px" }}>
+                      <div key={doc.name} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.12)", marginBottom: "6px" }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                           <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>📄</span>
                           <div style={{ flex: 1, minWidth: 0 }}>
@@ -3821,7 +3821,7 @@ ${chatHtml}
                 </div>
               ))}
               {pdfDocs.map((doc, i) => (
-                <div key={i} style={{
+                <div key={doc.name} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
                   borderRadius: "5px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.1)",
                   marginBottom: "4px",
@@ -4144,7 +4144,7 @@ ${chatHtml}
             {attachments.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px", padding: "4px 0" }}>
                 {attachments.map((att, i) => (
-                  <div key={i} style={{
+                  <div key={att._id || att.name} style={{
                     display: "flex", alignItems: "center", gap: "6px",
                     padding: "4px 8px", borderRadius: "6px",
                     background: att.isPdf ? "rgba(136,187,204,0.08)" : "rgba(124,224,138,0.06)",
