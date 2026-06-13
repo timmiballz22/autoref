@@ -914,6 +914,69 @@ function formatCrossRefsForAI(crossRefs) {
   return s;
 }
 
+// ─── Deterministic cross-reference report (model-independent fallback) ───
+// Builds a real, page-cited markdown report straight from the auto-computed
+// coordinate index. Guarantees concrete findings even if the LLM fails.
+function buildDeterministicCrossRef(crossRefs, pdfDocs) {
+  const docs = Array.isArray(pdfDocs) ? pdfDocs : [];
+  const docLine = docs.map(d => `- **${d.name}** — ${d.pageCount} page(s)`).join("\n") || "- (no documents)";
+  let s = `## 1. Document Summary\n${docLine}\n\n`;
+
+  const refs = Array.isArray(crossRefs) ? crossRefs : [];
+  const byType = { clause: [], amount: [], percentage: [] };
+  for (const r of refs) { if (byType[r.type]) byType[r.type].push(r); }
+
+  s += `## 2. Key Findings\n`;
+  if (refs.length === 0) {
+    s += `No coordinate-matched cross-references were auto-detected between the documents. This can happen when the documents share no common clause numbers, dollar amounts, or percentages, or when text extraction was limited (e.g. scanned pages).\n\n`;
+  } else {
+    s += `Auto-detected **${refs.length}** coordinate-mapped matches across the documents: ${byType.clause.length} clause/section, ${byType.amount.length} dollar-amount, and ${byType.percentage.length} percentage matches.\n\n`;
+  }
+
+  s += `## 3. Cross-Reference Analysis\n`;
+  const section = (title, list, fmt) => {
+    if (!list.length) return "";
+    let out = `\n**${title}:**\n`;
+    for (const r of list.slice(0, 30)) out += `- ${fmt(r)}\n`;
+    if (list.length > 30) out += `- _…and ${list.length - 30} more_\n`;
+    return out;
+  };
+  if (refs.length === 0) {
+    s += `No direct matches to report.\n`;
+  } else {
+    s += section("Shared clauses / sections", byType.clause, r => `Clause ${r.keyword} appears in both: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+    s += section("Shared dollar amounts", byType.amount, r => `Amount ${r.keyword}: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+    s += section("Shared percentages (likely allocations)", byType.percentage, r => `${r.keyword}: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+  }
+  s += `\n`;
+
+  s += `## 4. Discrepancies & Concerns\n`;
+  s += `This is an automated structural match. Each shared value above should be verified in context — a matching dollar amount or percentage in two documents may be consistent (correct) or may indicate a figure that should differ. Manually review each pairing against the source pages.\n\n`;
+
+  s += `## 5. Compliance Notes\n`;
+  s += `Automated cross-referencing cannot assess SIS Act compliance on its own. Use the matched clauses above as a starting point to confirm trust-deed powers align with the investment strategy and member records.\n\n`;
+
+  s += `## 6. Recommendations\n`;
+  s += `- Open each cited page pair (use the cross-reference panel) and confirm the matched values are intentional.\n- For full narrative analysis across all pages, load a larger model (Llama 3.2 3B or Phi 3.5 Mini) which can hold far more document text in context.\n\n`;
+
+  s += `## 7. References\n`;
+  const pagesByDoc = {};
+  for (const r of refs) {
+    (pagesByDoc[r.sourceDoc] = pagesByDoc[r.sourceDoc] || new Set()).add(r.sourcePage);
+    (pagesByDoc[r.targetDoc] = pagesByDoc[r.targetDoc] || new Set()).add(r.targetPage);
+  }
+  const refDocs = Object.keys(pagesByDoc);
+  if (refDocs.length === 0) {
+    s += `No pages cited (no matches detected).\n`;
+  } else {
+    for (const name of refDocs) {
+      const pages = [...pagesByDoc[name]].sort((a, b) => a - b);
+      s += `- **${name}**: pages ${pages.join(", ")}\n`;
+    }
+  }
+  return s;
+}
+
 // ─── Web Search via DuckDuckGo Instant Answer API ───
 // Used by Reviewer agents to research topics on the web.
 async function searchWeb(query) {
@@ -2916,6 +2979,7 @@ Rules:
       streamThrottle.flush(); // Ensure final content is displayed
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
+      let usedDeterministicFallback = false;
       if (isCrossRefTask && /please\s+(share|provide|upload).*(document|file|url|link)|need.*(url|link)/i.test(mainRaw)) {
         setActivityStatus("Cross-reference retry: using already uploaded artifacts...");
         const retryMsgs = [
@@ -2940,7 +3004,17 @@ Rules:
           timeoutMs: 180000,
         });
         const forced = extractRaw(forceData);
-        if (forced && !looksLikeCrossRefNonAnswer(forced)) mainRaw = forced;
+        if (forced && !looksLikeCrossRefNonAnswer(forced)) {
+          mainRaw = forced;
+        } else if (looksLikeCrossRefNonAnswer(mainRaw)) {
+          // Both the model's first attempt and the forced retry failed to produce
+          // a real analysis. Fall back to the deterministic coordinate-index report
+          // so the user ALWAYS gets concrete, page-cited findings — never a planning
+          // preamble or an empty result.
+          const deterministic = buildDeterministicCrossRef(crossRefs, pdfDocs);
+          mainRaw = `_The on-device model could not produce a full narrative cross-reference for documents this large, so here is an auto-generated structural cross-reference built directly from the coordinate-matched index:_\n\n${deterministic}`;
+          usedDeterministicFallback = true;
+        }
       }
       setStreamingText(""); // Clear streaming display
 
@@ -2960,7 +3034,9 @@ Rules:
 
       // Adaptive reflection: small models get 1 pass always (saves GPU time + memory)
       // Larger models: 2 passes for document queries (accuracy matters), 1 for simple
-      const REFLECTION_PASSES = isSmallModelSend ? 1 : (hasDocuments ? 2 : 1);
+      // Deterministic fallback output is already clean and correct — skip reflection
+      // entirely so the weak model can't mangle it.
+      const REFLECTION_PASSES = usedDeterministicFallback ? 0 : (isSmallModelSend ? 1 : (hasDocuments ? 2 : 1));
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
@@ -3033,7 +3109,7 @@ Rules:
       // ─── STEP 5: Verification — only for complex document queries on larger models ───
       // Skip on small models (Qwen 0.5B) — the extra LLM call is too slow and OOM-prone
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery && !isSmallModelSend) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModelSend && !usedDeterministicFallback) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -3182,7 +3258,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
       setStreamingText("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs, crossRefs, localModelId]);
 
   const clearChat = async () => {
     try { abortRef.current?.abort?.(); } catch {}
