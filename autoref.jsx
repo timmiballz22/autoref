@@ -1717,6 +1717,13 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
 
+  // Auto-dismiss error messages after 8 seconds so stale errors don't linger
+  useEffect(() => {
+    if (!err) return;
+    const t = setTimeout(() => setErr(null), 8000);
+    return () => clearTimeout(t);
+  }, [err]);
+
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
     // Save state to storage (called on interval, visibility change, beforeunload)
@@ -2045,6 +2052,12 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
               setPdfLoading(prev => prev.map(p => p.name === file.name ? { ...p, progress: current, total } : p));
             });
             setActivityStatus("");
+            // If the user removed the attachment chip while extraction was running,
+            // loadingNamesRef no longer has this name — skip adding to docs/artifacts.
+            if (!loadingNamesRef.current.has(file.name)) {
+              setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+              return;
+            }
             // Replace loading placeholder with real extracted content
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
@@ -2117,7 +2130,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   }, [createPdfEditArtifact]); // No stale dependency on attachments — all checks use functional updates
 
   const removeAttachment = useCallback((index) => {
-    setAttachments(prev => prev.filter((_, i) => i !== index));
+    setAttachments(prev => {
+      const att = prev[index];
+      // If removing a still-loading PDF, also clear the loading tracker
+      // so the sidebar doesn't later add a doc the user already removed
+      if (att && att.isPdf && att._loading) {
+        loadingNamesRef.current.delete(att.name);
+        setPdfLoading(p => p.filter(pl => pl.name !== att.name));
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   // ─── System prompt builder ───
@@ -3269,15 +3291,20 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
         const xrefBlob = new Blob([xrefHtml], { type: "text/html" });
         const xrefUrl = URL.createObjectURL(xrefBlob);
         const xrefName = `Cross-Reference-${new Date().toISOString().slice(0,10)}.html`;
-        setExportedArtifacts(prev => [...prev, {
-          id: "xref-" + Date.now(),
-          name: xrefName,
-          type: "text/html",
-          blobUrl: xrefUrl,
-          size: xrefBlob.size,
-          timestamp: new Date(),
-          kind: "cross-ref-artifact",
-        }]);
+        setExportedArtifacts(prev => {
+          // Revoke and replace older cross-ref artifacts so they don't pile up
+          prev.forEach(a => { if (a.kind === "cross-ref-artifact") try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+          const filtered = prev.filter(a => a.kind !== "cross-ref-artifact");
+          return [...filtered, {
+            id: "xref-" + Date.now(),
+            name: xrefName,
+            type: "text/html",
+            blobUrl: xrefUrl,
+            size: xrefBlob.size,
+            timestamp: new Date(),
+            kind: "cross-ref-artifact",
+          }];
+        });
         setArtifactsOpen(true);
       }
 
@@ -3403,7 +3430,7 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
     let chatHtml = "";
     for (const m of msgs) {
       if (m.role === "user") {
-        const userText = (m.content || "").replace(/\n\n---\n\*\*Attached files:\*\*[\s\S]*$/, "").trim();
+        const userText = (m.displayContent || m.content || "").replace(/\n\n---\n\*\*Attached files:\*\*[\s\S]*$/, "").trim();
         if (userText) {
           chatHtml += `<div style="background:#e8f8f5;border:1px solid #a3e4d7;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:13px"><strong style="color:#117864">You:</strong> ${toHtml(userText)}</div>`;
         }
@@ -4098,7 +4125,7 @@ ${chatHtml}
                   {activityStatus && <span style={{ color: "var(--ac2)", fontFamily: "var(--m)", fontSize: "10px" }}>{activityStatus}</span>}
                 </div>
               )}
-              {err && <div style={{ color: "#f88", fontSize: "12px", padding: "6px 2px" }}>{err}</div>}
+              {err && <div onClick={() => setErr(null)} style={{ color: "#f88", fontSize: "12px", padding: "6px 2px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" }}><span>{err}</span><span style={{ fontSize: "10px", opacity: 0.5 }}>✕</span></div>}
 
               <div ref={scrollRef} />
             </div>
@@ -4234,15 +4261,23 @@ ${chatHtml}
                       onClick={() => {
                         navigator.clipboard.readText().then(text => {
                           if (text && text.trim()) {
-                            setAttachments(prev => prev.length >= 20 ? prev : [...prev, {
-                              name: "clipboard.txt",
-                              type: "text/plain",
-                              content: text.slice(0, 512 * 1024),
-                              size: new Blob([text]).size,
-                              isImage: false,
-                            }]);
+                            setAttachments(prev => {
+                              if (prev.length >= 20) {
+                                setErr("Attachment limit reached (20). Remove some files first.");
+                                return prev;
+                              }
+                              // Dedup: if a clipboard.txt already exists, replace it
+                              const filtered = prev.filter(a => a.name !== "clipboard.txt");
+                              return [...filtered, {
+                                name: "clipboard.txt",
+                                type: "text/plain",
+                                content: text.slice(0, 512 * 1024),
+                                size: new Blob([text]).size,
+                                isImage: false,
+                              }];
+                            });
                           }
-                        }).catch(() => {});
+                        }).catch(() => setErr("Clipboard access denied. Try pasting into the text box instead."));
                         setAttachMenuOpen(false);
                       }}
                       style={{
@@ -4275,7 +4310,13 @@ ${chatHtml}
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={e => setInput(e.target.value)}
+                onChange={e => {
+                  setInput(e.target.value);
+                  // Auto-resize: collapse to content height, capped at maxHeight
+                  const ta = e.target;
+                  ta.style.height = "auto";
+                  ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
+                }}
                 onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
                 }}
