@@ -1543,6 +1543,7 @@ function Auto() {
   const localEngineRef = useRef(null);
   const pdfDocNamesRef = useRef(new Set());   // names of loaded docs (dedup)
   const loadingNamesRef = useRef(new Set());  // names of in-flight PDF extractions (dedup)
+  const attachmentsRef = useRef([]);          // mirror of attachments for sync cap checks
   const [localModelId, setLocalModelId] = useState(LOCAL_MODELS[0].id);
   // idle | cached | downloading | loading | ready | error | exportDone
   const [localModelStatus, setLocalModelStatus] = useState("idle");
@@ -1714,6 +1715,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
   useEffect(() => { memRef.current = mem; }, [mem]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
 
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
@@ -1992,6 +1994,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     const MAX_ATTACHMENTS = 20; // No file size limits — accept any size
+    // Track committed slots synchronously across this batch. attachmentsRef reflects
+    // already-committed attachments; the counter accounts for files added in THIS drop
+    // before React commits the state updates (otherwise a multi-file drop overshoots
+    // the cap and silently drops the chat chip while still extracting the PDF).
+    let slotsUsed = attachmentsRef.current.length;
 
     files.forEach(file => {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
@@ -2004,6 +2011,13 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
           setErr(`"${file.name}" is already loaded. Remove it first to re-upload a changed version.`);
           return;
         }
+        // Enforce the cap BEFORE starting extraction — otherwise the doc lands in
+        // pdfDocs/sidebar but the chat chip is silently dropped (inconsistent state).
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         loadingNamesRef.current.add(file.name);
         // PDF: show immediate placeholder chip so user sees the file was accepted
         const placeholderId = `pdf-loading-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${file.name}`;
@@ -2067,6 +2081,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
@@ -2074,8 +2093,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true }];
           });
         };
+        reader.onerror = () => setErr(`Could not read image "${file.name}". Try again.`);
         reader.readAsDataURL(file);
       } else {
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
@@ -2083,6 +2108,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false }];
           });
         };
+        reader.onerror = () => setErr(`Could not read file "${file.name}". Try again.`);
         reader.readAsText(file);
       }
     });
@@ -3519,13 +3545,15 @@ ${chatHtml}
               <button onClick={() => { try { navigator.clipboard.writeText(docTextDraft ?? pdfDocs[docTextViewerIdx].text); } catch {} }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
                 const idx = docTextViewerIdx;
-                setPdfDocs(prev => {
-                  const doc = prev[idx];
-                  if (!doc) return prev;
-                  const newText = docTextDraft ?? doc.text;
-                  createPdfEditArtifact(doc.name, newText, doc.pageCount);
-                  return prev.map((d, i) => i === idx ? { ...d, text: newText } : d);
-                });
+                const doc = pdfDocs[idx];
+                if (!doc) { setDocTextDraft(null); return; }
+                // No-op guard: nothing to save when there are no edits
+                if (docTextDraft == null || docTextDraft === doc.text) { setDocTextDraft(null); return; }
+                const newText = docTextDraft;
+                // Pure state update — no side effects inside the updater
+                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: newText } : d));
+                // Regenerate the editable artifact once, outside the updater
+                createPdfEditArtifact(doc.name, newText, doc.pageCount);
                 setDocTextDraft(null);
               }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
               <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft ?? pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
