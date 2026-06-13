@@ -282,6 +282,16 @@ function isGarbledOutput(text) {
   // Also detect rapid language-switching: short runs of multiple scripts mixed together
   const multiScriptRuns = (text.match(/[一-鿿]{2,}|[฀-๿]{2,}|[؀-ۿ]{2,}/g) || []).length;
   if (multiScriptRuns >= 4) return true;
+  // Detect repetitive token loops: same word/phrase repeated 6+ times in a row
+  if (/\b(\w{2,})\s+(\1\s+){5,}/i.test(text)) return true;
+  // Detect repeating sentence fragments (10+ words repeated verbatim)
+  const sentences = text.split(/[.!?\n]/).map(s => s.trim()).filter(s => s.length > 20);
+  if (sentences.length >= 4) {
+    const freq = {};
+    for (const s of sentences) { freq[s] = (freq[s] || 0) + 1; }
+    const maxRepeat = Math.max(0, ...Object.values(freq));
+    if (maxRepeat >= 4) return true;
+  }
   return false;
 }
 
@@ -2481,12 +2491,14 @@ Complete list of all document pages cited, grouped by document.
               await tryInterruptGeneration();
               throw new DOMException("Aborted", "AbortError");
             }
+            let stallTimer;
             const nextChunk = await Promise.race([
               iterator.next(),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("LLM stream stalled — try a shorter query or simpler model")), stallTimeoutMs)
-              ),
+              new Promise((_, reject) => {
+                stallTimer = setTimeout(() => reject(new Error("LLM stream stalled — try a shorter query or simpler model")), stallTimeoutMs);
+              }),
             ]);
+            clearTimeout(stallTimer);
             if (nextChunk.done) break;
             const chunk = nextChunk.value;
             const delta = chunk.choices?.[0]?.delta?.content || "";
@@ -2771,7 +2783,7 @@ Complete list of all document pages cited, grouped by document.
       }
       throw new Error(`Local model error: ${e.message}`);
     }
-  }, [localModelId]);
+  }, [localModelId, smsfXrefRulesText]);
 
   // ─── Main send function with optimised research loop ───
   const send = useCallback(async () => {
@@ -3286,6 +3298,7 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
     setCrossRefPanelOpen(false);
     setPdfDocs([]);
     setPdfLoading([]);
+    loadingNamesRef.current.clear();
     setDocTextViewerOpen(false);
     setPdfViewerOpen(false);
     setArtifactsOpen(false);
@@ -3782,7 +3795,7 @@ ${chatHtml}
             <div style={{ padding: "0 10px 10px", display: "flex", flexDirection: "column", gap: "6px" }}>
               {/* Tier cards */}
               {LOCAL_MODELS.map(m => {
-                const locked = localModelStatus === "downloading" || localModelStatus === "loading" || localModelStatus === "ready";
+                const locked = busy || localModelStatus === "downloading" || localModelStatus === "loading" || localModelStatus === "ready";
                 const selected = localModelId === m.id;
                 return (
                   <div
