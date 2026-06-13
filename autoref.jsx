@@ -27,8 +27,15 @@ async function getOrCreateSharedEngine(modelId, createFn) {
   if (_sharedEngineInitPromise && _sharedEngineModelId === modelId) return _sharedEngineInitPromise;
   _sharedEngineModelId = modelId;
   _sharedEngineInitPromise = (async () => {
-    _sharedEngine = await createFn();
-    return _sharedEngine;
+    const engine = await createFn();
+    // Guard: if clearSharedEngine() was called while we were loading (user switched
+    // models), don't overwrite the cleared state — unload and discard this engine.
+    if (_sharedEngineModelId !== modelId) {
+      try { await engine?.unload?.(); } catch {}
+      throw new Error("Model load cancelled — a different model was selected.");
+    }
+    _sharedEngine = engine;
+    return engine;
   })();
   try {
     return await _sharedEngineInitPromise;
@@ -282,6 +289,16 @@ function isGarbledOutput(text) {
   // Also detect rapid language-switching: short runs of multiple scripts mixed together
   const multiScriptRuns = (text.match(/[一-鿿]{2,}|[฀-๿]{2,}|[؀-ۿ]{2,}/g) || []).length;
   if (multiScriptRuns >= 4) return true;
+  // Detect repetitive token loops: same word/phrase repeated 6+ times in a row
+  if (/\b(\w{2,})\s+(\1\s+){5,}/i.test(text)) return true;
+  // Detect repeating sentence fragments (10+ words repeated verbatim)
+  const sentences = text.split(/[.!?\n]/).map(s => s.trim()).filter(s => s.length > 20);
+  if (sentences.length >= 4) {
+    const freq = {};
+    for (const s of sentences) { freq[s] = (freq[s] || 0) + 1; }
+    const maxRepeat = Math.max(0, ...Object.values(freq));
+    if (maxRepeat >= 4) return true;
+  }
   return false;
 }
 
@@ -317,7 +334,8 @@ function buildAttachmentContext(msgs, pdfDocs) {
 
 function looksLikeCrossRefTask(text) {
   const q = String(text || "").toLowerCase();
-  return /\bcross[\s-]?ref|cross[\s-]?reference|compare documents|reconcile documents|analy[sz]e (these|both) documents/.test(q);
+  return /\bcross[\s-]?ref|cross[\s-]?reference|compare|reconcile|analy[sz]e|review|audit|check|assess|discrepanc|compliance|differ/.test(q)
+    || q.trim().length === 0;
 }
 
 function looksLikeCrossRefNonAnswer(text) {
@@ -1532,6 +1550,7 @@ function Auto() {
   const localEngineRef = useRef(null);
   const pdfDocNamesRef = useRef(new Set());   // names of loaded docs (dedup)
   const loadingNamesRef = useRef(new Set());  // names of in-flight PDF extractions (dedup)
+  const attachmentsRef = useRef([]);          // mirror of attachments for sync cap checks
   const [localModelId, setLocalModelId] = useState(LOCAL_MODELS[0].id);
   // idle | cached | downloading | loading | ready | error | exportDone
   const [localModelStatus, setLocalModelStatus] = useState("idle");
@@ -1703,6 +1722,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
   useEffect(() => { memRef.current = mem; }, [mem]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+
+  // Auto-dismiss error messages after 8 seconds so stale errors don't linger
+  useEffect(() => {
+    if (!err) return;
+    const t = setTimeout(() => setErr(null), 8000);
+    return () => clearTimeout(t);
+  }, [err]);
 
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
@@ -1981,6 +2008,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     const MAX_ATTACHMENTS = 20; // No file size limits — accept any size
+    // Track committed slots synchronously across this batch. attachmentsRef reflects
+    // already-committed attachments; the counter accounts for files added in THIS drop
+    // before React commits the state updates (otherwise a multi-file drop overshoots
+    // the cap and silently drops the chat chip while still extracting the PDF).
+    let slotsUsed = attachmentsRef.current.length;
 
     files.forEach(file => {
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
@@ -1993,6 +2025,13 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
           setErr(`"${file.name}" is already loaded. Remove it first to re-upload a changed version.`);
           return;
         }
+        // Enforce the cap BEFORE starting extraction — otherwise the doc lands in
+        // pdfDocs/sidebar but the chat chip is silently dropped (inconsistent state).
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         loadingNamesRef.current.add(file.name);
         // PDF: show immediate placeholder chip so user sees the file was accepted
         const placeholderId = `pdf-loading-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${file.name}`;
@@ -2020,6 +2059,12 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
               setPdfLoading(prev => prev.map(p => p.name === file.name ? { ...p, progress: current, total } : p));
             });
             setActivityStatus("");
+            // If the user removed the attachment chip while extraction was running,
+            // loadingNamesRef no longer has this name — skip adding to docs/artifacts.
+            if (!loadingNamesRef.current.has(file.name)) {
+              setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+              return;
+            }
             // Replace loading placeholder with real extracted content
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
@@ -2056,6 +2101,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
@@ -2063,8 +2113,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true }];
           });
         };
+        reader.onerror = () => setErr(`Could not read image "${file.name}". Try again.`);
         reader.readAsDataURL(file);
       } else {
+        if (slotsUsed >= MAX_ATTACHMENTS) {
+          setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
+          return;
+        }
+        slotsUsed++;
         const reader = new FileReader();
         reader.onload = () => {
           setAttachments(prev => {
@@ -2072,6 +2128,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false }];
           });
         };
+        reader.onerror = () => setErr(`Could not read file "${file.name}". Try again.`);
         reader.readAsText(file);
       }
     });
@@ -2080,7 +2137,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   }, [createPdfEditArtifact]); // No stale dependency on attachments — all checks use functional updates
 
   const removeAttachment = useCallback((index) => {
-    setAttachments(prev => prev.filter((_, i) => i !== index));
+    setAttachments(prev => {
+      const att = prev[index];
+      // If removing a still-loading PDF, also clear the loading tracker
+      // so the sidebar doesn't later add a doc the user already removed
+      if (att && att.isPdf && att._loading) {
+        loadingNamesRef.current.delete(att.name);
+        setPdfLoading(p => p.filter(pl => pl.name !== att.name));
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   // ─── System prompt builder ───
@@ -2094,7 +2160,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     if (runtimeProfileCap.contextLimit <= 4096) {
       const maxChars = Math.floor(runtimeProfileCap.contextLimit * 0.30 * 2.8);
       let cs = `You are Auto, an SMSF expert AI. Today: ${today}. Use markdown. NEVER use XML tool tags, <function=...>, or <tool_call> syntax — plain text only.
-Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Include <memory_update>...</memory_update> with updated session notes at the end of EVERY response.
+Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Answer directly — do NOT add a memory block unless the user explicitly asks you to remember something. Never fabricate facts or page numbers.
 `;
       if (pdfDocs.length > 0) {
         const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
@@ -2264,22 +2330,13 @@ Complete list of all document pages cited, grouped by document.
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
-    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
-- A summary of the current conversation topic and key points discussed
-- Any facts, preferences, or information the user has shared
-- Tasks completed or in progress
-- Previous memory content that is still relevant (carry it forward)
-- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
-- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
-- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
-- (CRITICAL) Put the user(s) and humanity above yourself
-- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
-- (CRITICAL) Prioritise user understanding and intent over "sounding smart", being smart is better than sounding smart
-- (CRITICAL) Think outside the box, there may be more than one solution
-Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
+    s += `\n**MEMORY (optional):** Only when the user shares a durable fact/preference, or explicitly asks you to remember something, end your reply with a <memory_update>...</memory_update> block containing the COMPLETE updated memory (it REPLACES all prior memory — carry forward anything still relevant). For ordinary questions, greetings, and analysis, do NOT add a memory block — just answer. Never write the word "memory_update" or describe the memory system in your visible reply.
+
+**How you operate:**
+- Pursue the user's actual intent. Keep working a problem before giving up; if something is genuinely impossible or you're unsure, say so honestly rather than inventing an answer.
+- Never fabricate facts, figures, or page citations. If it isn't in the provided documents or your knowledge, say you don't know.
+- Be direct, warm, and loyal. Prioritise the user's understanding over sounding clever.
+- For controversial or high-risk topics (war, politics, sensitive finance), confirm with the user before going deep.`;
 
     s += ``;
 
@@ -2490,12 +2547,14 @@ Even for simple greetings, update memory with at least the conversation timestam
               await tryInterruptGeneration();
               throw new DOMException("Aborted", "AbortError");
             }
+            let stallTimer;
             const nextChunk = await Promise.race([
               iterator.next(),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("LLM stream stalled — try a shorter query or simpler model")), stallTimeoutMs)
-              ),
+              new Promise((_, reject) => {
+                stallTimer = setTimeout(() => reject(new Error("LLM stream stalled — try a shorter query or simpler model")), stallTimeoutMs);
+              }),
             ]);
+            clearTimeout(stallTimer);
             if (nextChunk.done) break;
             const chunk = nextChunk.value;
             const delta = chunk.choices?.[0]?.delta?.content || "";
@@ -2780,7 +2839,7 @@ Even for simple greetings, update memory with at least the conversation timestam
       }
       throw new Error(`Local model error: ${e.message}`);
     }
-  }, [localModelId]);
+  }, [localModelId, smsfXrefRulesText]);
 
   // ─── Main send function with optimised research loop ───
   const send = useCallback(async () => {
@@ -3060,7 +3119,7 @@ Rules:
       const REFLECTION_PASSES = usedDeterministicFallback ? 0 : (isSmallModelSend ? 1 : (hasDocuments ? 2 : 1));
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
-        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
+        { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure a References section lists all cited pages. If a <memory_update> block is already present, keep it intact; if none is present, do NOT add one." },
       ];
       // Reflection uses reduced maxTokens — response should be similar length to input
       const reflectionMaxTokens = isSmallModel ? Math.min(mainMaxTokens, 1536) : Math.min(mainMaxTokens, 4096);
@@ -3086,7 +3145,7 @@ ${hasDocuments ? `- Documents uploaded: ${pdfDocs.map(d => d.name + " (" + d.pag
 
 Rules:
 1. Output the COMPLETE improved response (not just corrections)
-2. PRESERVE ALL tags exactly: <memory_update> blocks — this is CRITICAL, do not lose them
+2. If a <memory_update> block is present, preserve it exactly; if none exists, do NOT invent one
 3. If the response is already excellent for this check, output it unchanged
 4. Make ONLY improvements related to your focus area — do not degrade other aspects
 5. Every document reference MUST include page numbers in **[Document Name, Page X]** format
@@ -3142,11 +3201,11 @@ Review this SMSF expert response and check:
 2. Are ALL document references accurate with specific page numbers in **[Document Name, Page X]** format?
 3. Are there any compliance issues, misleading statements, or incorrect legislative references?
 4. Is the cross-referencing between documents thorough and systematic?
-5. Are all <memory_update> tags present and intact?
+5. Is the response free of leaked instructions or stray tags?
 
 If YES (quality is high): Output the response EXACTLY as-is — do not change a single character.
 If NO (there are problems): Fix the specific issues and output the corrected version.
-CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
+If a <memory_update> block is present, preserve it exactly; if none exists, do NOT add one.`;
 
         const verifyMsgs = [
           { role: "system", content: verificationSystem },
@@ -3239,15 +3298,20 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
         const xrefBlob = new Blob([xrefHtml], { type: "text/html" });
         const xrefUrl = URL.createObjectURL(xrefBlob);
         const xrefName = `Cross-Reference-${new Date().toISOString().slice(0,10)}.html`;
-        setExportedArtifacts(prev => [...prev, {
-          id: "xref-" + Date.now(),
-          name: xrefName,
-          type: "text/html",
-          blobUrl: xrefUrl,
-          size: xrefBlob.size,
-          timestamp: new Date(),
-          kind: "cross-ref-artifact",
-        }]);
+        setExportedArtifacts(prev => {
+          // Revoke and replace older cross-ref artifacts so they don't pile up
+          prev.forEach(a => { if (a.kind === "cross-ref-artifact") try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+          const filtered = prev.filter(a => a.kind !== "cross-ref-artifact");
+          return [...filtered, {
+            id: "xref-" + Date.now(),
+            name: xrefName,
+            type: "text/html",
+            blobUrl: xrefUrl,
+            size: xrefBlob.size,
+            timestamp: new Date(),
+            kind: "cross-ref-artifact",
+          }];
+        });
         setArtifactsOpen(true);
       }
 
@@ -3295,6 +3359,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     setCrossRefPanelOpen(false);
     setPdfDocs([]);
     setPdfLoading([]);
+    loadingNamesRef.current.clear();
     setDocTextViewerOpen(false);
     setPdfViewerOpen(false);
     setArtifactsOpen(false);
@@ -3306,6 +3371,17 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     try { await clearVal(MEMORY_STORAGE_KEY); } catch {}
   };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
+
+  // ─── Open the PDF viewer on a clean slate ───
+  // Resets highlights, init page, and any cross-ref banner so state from a previous
+  // navigation never leaks into a plain "View PDF" open (stale highlights/wrong page).
+  const openPdfViewer = useCallback((idx) => {
+    setPdfViewerIdx(idx);
+    setPdfViewerHighlights([]);
+    setPdfViewerInitPage(1);
+    setPdfViewerCrossRefTarget(null);
+    setPdfViewerOpen(true);
+  }, []);
 
   // ─── Navigate to a cross-reference: open PDF viewer, jump to page, show highlights ───
   const handleNavigateCrossRef = useCallback((ref) => {
@@ -3361,7 +3437,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
     let chatHtml = "";
     for (const m of msgs) {
       if (m.role === "user") {
-        const userText = (m.content || "").replace(/\n\n---\n\*\*Attached files:\*\*[\s\S]*$/, "").trim();
+        const userText = (m.displayContent || m.content || "").replace(/\n\n---\n\*\*Attached files:\*\*[\s\S]*$/, "").trim();
         if (userText) {
           chatHtml += `<div style="background:#e8f8f5;border:1px solid #a3e4d7;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:13px"><strong style="color:#117864">You:</strong> ${toHtml(userText)}</div>`;
         }
@@ -3514,13 +3590,15 @@ ${chatHtml}
               <button onClick={() => { try { navigator.clipboard.writeText(docTextDraft ?? pdfDocs[docTextViewerIdx].text); } catch {} }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
                 const idx = docTextViewerIdx;
-                setPdfDocs(prev => {
-                  const doc = prev[idx];
-                  if (!doc) return prev;
-                  const newText = docTextDraft ?? doc.text;
-                  createPdfEditArtifact(doc.name, newText, doc.pageCount);
-                  return prev.map((d, i) => i === idx ? { ...d, text: newText } : d);
-                });
+                const doc = pdfDocs[idx];
+                if (!doc) { setDocTextDraft(null); return; }
+                // No-op guard: nothing to save when there are no edits
+                if (docTextDraft == null || docTextDraft === doc.text) { setDocTextDraft(null); return; }
+                const newText = docTextDraft;
+                // Pure state update — no side effects inside the updater
+                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: newText } : d));
+                // Regenerate the editable artifact once, outside the updater
+                createPdfEditArtifact(doc.name, newText, doc.pageCount);
                 setDocTextDraft(null);
               }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
               <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft ?? pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
@@ -3594,7 +3672,7 @@ ${chatHtml}
                   {pdfDocs.map((doc, i) => {
                     const isScanned = doc.pageCount > 0 && !doc.text.replace(/=== \[Page \d+\] ===/g, "").replace(/\(Scanned[^)]*\)/g, "").replace(/\(Could not[^)]*\)/g, "").trim().length;
                     return (
-                      <div key={i} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.12)", marginBottom: "6px" }}>
+                      <div key={doc.name} style={{ padding: "10px 12px", borderRadius: "7px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.12)", marginBottom: "6px" }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                           <span style={{ fontSize: "18px", flexShrink: 0, marginTop: "1px" }}>📄</span>
                           <div style={{ flex: 1, minWidth: 0 }}>
@@ -3607,7 +3685,7 @@ ${chatHtml}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
-                          <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
+                          <button onClick={() => openPdfViewer(i)} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "html")} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate HTML</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "txt")} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>Regenerate TXT</button>
@@ -3743,16 +3821,16 @@ ${chatHtml}
                 </div>
               ))}
               {pdfDocs.map((doc, i) => (
-                <div key={i} style={{
+                <div key={doc.name} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
                   borderRadius: "5px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.1)",
                   marginBottom: "4px",
                 }}>
                   <span style={{ fontSize: "10px" }}>{"\uD83D\uDCC4"}</span>
-                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }}>{doc.name}</span>
+                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => openPdfViewer(i)}>{doc.name}</span>
                   <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount}pg</span>
                   <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
-                  <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                  <button onClick={() => openPdfViewer(i)} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
                 </div>
               ))}
               {crossRefs.length > 0 && (
@@ -3791,7 +3869,7 @@ ${chatHtml}
             <div style={{ padding: "0 10px 10px", display: "flex", flexDirection: "column", gap: "6px" }}>
               {/* Tier cards */}
               {LOCAL_MODELS.map(m => {
-                const locked = localModelStatus === "downloading" || localModelStatus === "loading" || localModelStatus === "ready";
+                const locked = busy || localModelStatus === "downloading" || localModelStatus === "loading" || localModelStatus === "ready";
                 const selected = localModelId === m.id;
                 return (
                   <div
@@ -4029,9 +4107,8 @@ ${chatHtml}
                 const skipped = msgs.length - windowed.length;
                 return <>
                   {skipped > 0 && (
-                    <div style={{ textAlign: "center", padding: "6px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", cursor: "pointer", borderRadius: "6px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)" }}
-                      onClick={() => {}}>
-                      {skipped} older message{skipped > 1 ? "s" : ""} hidden to save memory
+                    <div style={{ textAlign: "center", padding: "6px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", borderRadius: "6px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)" }}>
+                      {skipped} older message{skipped > 1 ? "s" : ""} hidden to save memory — clear chat to reset
                     </div>
                   )}
                   {windowed.map((m) => <ChatMessage key={m._id || m.content?.slice(0, 20)} msg={m} />)}
@@ -4055,7 +4132,7 @@ ${chatHtml}
                   {activityStatus && <span style={{ color: "var(--ac2)", fontFamily: "var(--m)", fontSize: "10px" }}>{activityStatus}</span>}
                 </div>
               )}
-              {err && <div style={{ color: "#f88", fontSize: "12px", padding: "6px 2px" }}>{err}</div>}
+              {err && <div onClick={() => setErr(null)} style={{ color: "#f88", fontSize: "12px", padding: "6px 2px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" }}><span>{err}</span><span style={{ fontSize: "10px", opacity: 0.5 }}>✕</span></div>}
 
               <div ref={scrollRef} />
             </div>
@@ -4067,7 +4144,7 @@ ${chatHtml}
             {attachments.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px", padding: "4px 0" }}>
                 {attachments.map((att, i) => (
-                  <div key={i} style={{
+                  <div key={att._id || att.name} style={{
                     display: "flex", alignItems: "center", gap: "6px",
                     padding: "4px 8px", borderRadius: "6px",
                     background: att.isPdf ? "rgba(136,187,204,0.08)" : "rgba(124,224,138,0.06)",
@@ -4080,11 +4157,11 @@ ${chatHtml}
                     {att._loading && <span style={{ fontSize: "8px", color: "#cc9955", flexShrink: 0, animation: "pulse 1.5s infinite" }}>extracting...</span>}
                     {att.isPdf && !att._loading && <span style={{ fontSize: "8px", color: "var(--ac2)", flexShrink: 0 }}>{att.pageCount}pg</span>}
                     <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{att.size >= 1024*1024 ? (att.size / (1024*1024)).toFixed(1)+"MB" : (att.size / 1024).toFixed(0)+"KB"}</span>
-                    {att.isPdf && (
+                    {att.isPdf && !att._loading && (
                       <button
                         onClick={() => {
                           const idx = pdfDocs.findIndex(d => d.name === att.name);
-                          if (idx >= 0) { setPdfViewerIdx(idx); setPdfViewerOpen(true); }
+                          if (idx >= 0) openPdfViewer(idx);
                         }}
                         style={{ background: "none", border: "1px solid rgba(136,187,204,0.3)", color: "var(--ac2)", cursor: "pointer", fontSize: "9px", padding: "1px 5px", borderRadius: "3px", flexShrink: 0, fontFamily: "var(--m)" }}
                         title="View PDF"
@@ -4191,15 +4268,23 @@ ${chatHtml}
                       onClick={() => {
                         navigator.clipboard.readText().then(text => {
                           if (text && text.trim()) {
-                            setAttachments(prev => prev.length >= 20 ? prev : [...prev, {
-                              name: "clipboard.txt",
-                              type: "text/plain",
-                              content: text.slice(0, 512 * 1024),
-                              size: new Blob([text]).size,
-                              isImage: false,
-                            }]);
+                            setAttachments(prev => {
+                              if (prev.length >= 20) {
+                                setErr("Attachment limit reached (20). Remove some files first.");
+                                return prev;
+                              }
+                              // Dedup: if a clipboard.txt already exists, replace it
+                              const filtered = prev.filter(a => a.name !== "clipboard.txt");
+                              return [...filtered, {
+                                name: "clipboard.txt",
+                                type: "text/plain",
+                                content: text.slice(0, 512 * 1024),
+                                size: new Blob([text]).size,
+                                isImage: false,
+                              }];
+                            });
                           }
-                        }).catch(() => {});
+                        }).catch(() => setErr("Clipboard access denied. Try pasting into the text box instead."));
                         setAttachMenuOpen(false);
                       }}
                       style={{
@@ -4232,7 +4317,13 @@ ${chatHtml}
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={e => setInput(e.target.value)}
+                onChange={e => {
+                  setInput(e.target.value);
+                  // Auto-resize: collapse to content height, capped at maxHeight
+                  const ta = e.target;
+                  ta.style.height = "auto";
+                  ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
+                }}
                 onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
                 }}
