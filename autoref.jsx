@@ -3338,6 +3338,17 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
   };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
+  // ─── Open the PDF viewer on a clean slate ───
+  // Resets highlights, init page, and any cross-ref banner so state from a previous
+  // navigation never leaks into a plain "View PDF" open (stale highlights/wrong page).
+  const openPdfViewer = useCallback((idx) => {
+    setPdfViewerIdx(idx);
+    setPdfViewerHighlights([]);
+    setPdfViewerInitPage(1);
+    setPdfViewerCrossRefTarget(null);
+    setPdfViewerOpen(true);
+  }, []);
+
   // ─── Navigate to a cross-reference: open PDF viewer, jump to page, show highlights ───
   const handleNavigateCrossRef = useCallback((ref) => {
     const srcIdx = pdfDocs.findIndex(d => d.name === ref.sourceDoc);
@@ -3640,7 +3651,7 @@ ${chatHtml}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: "4px", marginTop: "8px", flexWrap: "wrap" }}>
-                          <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
+                          <button onClick={() => openPdfViewer(i)} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View PDF</button>
                           <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>View Text</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "html")} style={{ ...btn("#7ce08a"), fontSize: "9px" }}>Regenerate HTML</button>
                           <button onClick={() => regeneratePdfArtifact(doc, "txt")} style={{ ...btn("#88bbcc"), fontSize: "9px" }}>Regenerate TXT</button>
@@ -3782,10 +3793,10 @@ ${chatHtml}
                   marginBottom: "4px",
                 }}>
                   <span style={{ fontSize: "10px" }}>{"\uD83D\uDCC4"}</span>
-                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }}>{doc.name}</span>
+                  <span style={{ fontSize: "10px", color: "var(--ac2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)", cursor: "pointer" }} onClick={() => openPdfViewer(i)}>{doc.name}</span>
                   <span style={{ fontSize: "8px", color: "var(--dm)", fontFamily: "var(--m)" }}>{doc.pageCount}pg</span>
                   <button onClick={() => { setDocTextViewerIdx(i); setDocTextViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View full extracted text">Text</button>
-                  <button onClick={() => { setPdfViewerIdx(i); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerOpen(true); }} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
+                  <button onClick={() => openPdfViewer(i)} style={{ background: "none", border: "1px solid rgba(136,187,204,0.2)", color: "var(--ac2)", cursor: "pointer", fontSize: "8px", padding: "1px 4px", borderRadius: "3px", fontFamily: "var(--m)" }} title="View PDF pages">PDF</button>
                 </div>
               ))}
               {crossRefs.length > 0 && (
@@ -4112,11 +4123,11 @@ ${chatHtml}
                     {att._loading && <span style={{ fontSize: "8px", color: "#cc9955", flexShrink: 0, animation: "pulse 1.5s infinite" }}>extracting...</span>}
                     {att.isPdf && !att._loading && <span style={{ fontSize: "8px", color: "var(--ac2)", flexShrink: 0 }}>{att.pageCount}pg</span>}
                     <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{att.size >= 1024*1024 ? (att.size / (1024*1024)).toFixed(1)+"MB" : (att.size / 1024).toFixed(0)+"KB"}</span>
-                    {att.isPdf && (
+                    {att.isPdf && !att._loading && (
                       <button
                         onClick={() => {
                           const idx = pdfDocs.findIndex(d => d.name === att.name);
-                          if (idx >= 0) { setPdfViewerIdx(idx); setPdfViewerOpen(true); }
+                          if (idx >= 0) openPdfViewer(idx);
                         }}
                         style={{ background: "none", border: "1px solid rgba(136,187,204,0.3)", color: "var(--ac2)", cursor: "pointer", fontSize: "9px", padding: "1px 5px", borderRadius: "3px", flexShrink: 0, fontFamily: "var(--m)" }}
                         title="View PDF"
