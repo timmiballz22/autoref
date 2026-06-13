@@ -2081,14 +2081,28 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 
 **CRITICAL — DEPTH REQUIREMENT**: You MUST analyse content from THROUGHOUT each document, NOT just the first page. Scan and cite content from beginning, middle, and end pages. A shallow answer that only mentions page 1 is UNACCEPTABLE. Reference at least 5+ different pages per document when possible. Cover key clauses, financial figures, member details, compliance items, and governance provisions found on various pages.
 
-### Response Structure for Document Analysis:
-1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
-2. **Key Findings**: Major observations with page citations
-3. **Cross-Reference Analysis**: Comparisons between documents with specific page references from EACH document
-4. **Discrepancies & Concerns**: Explicitly called out with page references from each document
-5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
-6. **Recommendations**: Actionable next steps based on findings
-7. **References**: Complete list of all document pages cited
+### Response Structure for Document Analysis (MANDATORY — use these exact headings, in this order, every time):
+## 1. Document Summary
+List each uploaded document with a 1-2 line description and its page count.
+## 2. Key Findings
+Major observations, each with a **[Document Name, Page X]** citation.
+## 3. Cross-Reference Analysis
+Direct comparisons between the documents. EVERY comparison must cite BOTH documents: **[Doc A, Page X]** vs **[Doc B, Page Y]**.
+## 4. Discrepancies & Concerns
+A bulleted register of every inconsistency found, each with page references from BOTH documents.
+## 5. Compliance Notes
+SIS Act / regulatory requirements and how the documents address (or fail to address) them.
+## 6. Recommendations
+Actionable next steps based on the findings.
+## 7. References
+Complete list of all document pages cited, grouped by document.
+
+### Output Discipline (CRITICAL for stability and accuracy):
+- Think step by step internally, but output ONLY the final structured analysis above — no preamble, no "I will now…", no restating the task.
+- Write in calm, precise, professional English. Never switch languages. Never emit non-English characters, random symbols, or repeated phrases.
+- State a fact ONCE. Do not repeat sentences or headings.
+- If you genuinely cannot find information for a section, write "No relevant content located in the provided pages." — never invent content or page numbers.
+- Ground EVERY claim in a page citation from the supplied document text. If it is not in the supplied text, do not assert it.
 
 `;
 
@@ -2348,6 +2362,13 @@ Even for simple greetings, update memory with at least the conversation timestam
       const defaultTemp = rp.isSmallModel ? 0.35 : 0.65;
       const temp = Number.isFinite(limits.temperature) ? Math.min(limits.temperature, rp.isSmallModel ? 0.5 : 0.8) : defaultTemp;
       const repetitionPenalty = rp.isSmallModel ? 1.15 : 1.05;
+      // Nucleus sampling: clip the low-probability tail where small models emit
+      // multilingual token-soup and random Unicode runs. Tighter top_p = far more
+      // stable, consistent, deterministic output (critical for cross-referencing).
+      const topP = rp.isSmallModel ? 0.85 : 0.92;
+      // Presence penalty nudges the model to keep moving through new content
+      // (more pages cited) instead of looping on the same phrase.
+      const presencePenalty = rp.isSmallModel ? 0.3 : 0.1;
       const dynamicTimeoutMs = limits.timeoutMs
         || Math.max(timeoutMs, Math.min(900000, Math.floor(90000 + estimateMessagesTokens(msgsToSend) * 10)));
       // Use streaming if onChunk callback is provided
@@ -2357,8 +2378,10 @@ Even for simple greetings, update memory with at least the conversation timestam
           stream = await engine.chat.completions.create({
             messages: msgsToSend,
             temperature: temp,
+            top_p: topP,
             max_tokens: cappedMaxTokens,
             frequency_penalty: repetitionPenalty - 1.0, // OpenAI-compat approximation
+            presence_penalty: presencePenalty,
             stream: true,
           });
         } catch (createErr) {
@@ -2414,8 +2437,10 @@ Even for simple greetings, update memory with at least the conversation timestam
         const resp = await withTimeout(engine.chat.completions.create({
           messages: msgsToSend,
           temperature: temp,
+          top_p: topP,
           max_tokens: cappedMaxTokens,
           frequency_penalty: repetitionPenalty - 1.0,
+          presence_penalty: presencePenalty,
         }), "LLM call");
         const content = resp.choices?.[0]?.message?.content || "";
         return {
