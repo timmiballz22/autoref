@@ -4034,9 +4034,8 @@ ${chatHtml}
                 const skipped = msgs.length - windowed.length;
                 return <>
                   {skipped > 0 && (
-                    <div style={{ textAlign: "center", padding: "6px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", cursor: "pointer", borderRadius: "6px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)" }}
-                      onClick={() => {}}>
-                      {skipped} older message{skipped > 1 ? "s" : ""} hidden to save memory
+                    <div style={{ textAlign: "center", padding: "6px", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", borderRadius: "6px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)" }}>
+                      {skipped} older message{skipped > 1 ? "s" : ""} hidden to save memory — clear chat to reset
                     </div>
                   )}
                   {windowed.map((m) => <ChatMessage key={m._id || m.content?.slice(0, 20)} msg={m} />)}
