@@ -323,15 +323,19 @@ function looksLikeCrossRefTask(text) {
 function looksLikeCrossRefNonAnswer(text) {
   const t = String(text || "").toLowerCase();
   if (!t.trim()) return true;
-  const genericAck = /i will|i can|i'm ready|certainly|understood|please provide|please share|upload/i.test(t);
-  const hasFindingsSignals = /mismatch|difference|discrep|reference|page\s+\d+|finding|evidence|comparison/i.test(t);
-  if (genericAck && !hasFindingsSignals) return true;
-  // Shallow answer: only mentions page 1 or has very few page citations (< 3 unique pages)
+  // A real cross-reference analysis MUST contain actual page citations.
+  // Zero page citations = the model is planning/acknowledging, not analysing.
   const pageCites = t.match(/page\s+(\d+)/gi) || [];
+  if (pageCites.length === 0) return true;
+  // Only references a single page (likely just page 1) and is short
   const uniquePages = new Set(pageCites.map(p => p.match(/\d+/)[0]));
-  if (pageCites.length > 0 && uniquePages.size < 3 && t.length < 1500) return true;
-  // Too short to be a real cross-reference
-  if (t.length < 400) return true;
+  if (uniquePages.size < 2 && t.length < 1500) return true;
+  // Planning/intent language with no substance: "I will compare", "First I will extract"
+  const planningIntent = /\b(i will|i can|i'm going to|let me|first,?\s+i|then,?\s+i|once i have)\b/i.test(t);
+  const hasConcreteData = /\*\*\[.*page\s+\d+/i.test(t) || /\bpage\s+\d+\b.*\bpage\s+\d+\b/i.test(t);
+  if (planningIntent && !hasConcreteData) return true;
+  // Too short to be a real cross-reference analysis
+  if (t.length < 600) return true;
   return false;
 }
 
@@ -910,6 +914,69 @@ function formatCrossRefsForAI(crossRefs) {
   return s;
 }
 
+// ─── Deterministic cross-reference report (model-independent fallback) ───
+// Builds a real, page-cited markdown report straight from the auto-computed
+// coordinate index. Guarantees concrete findings even if the LLM fails.
+function buildDeterministicCrossRef(crossRefs, pdfDocs) {
+  const docs = Array.isArray(pdfDocs) ? pdfDocs : [];
+  const docLine = docs.map(d => `- **${d.name}** — ${d.pageCount} page(s)`).join("\n") || "- (no documents)";
+  let s = `## 1. Document Summary\n${docLine}\n\n`;
+
+  const refs = Array.isArray(crossRefs) ? crossRefs : [];
+  const byType = { clause: [], amount: [], percentage: [] };
+  for (const r of refs) { if (byType[r.type]) byType[r.type].push(r); }
+
+  s += `## 2. Key Findings\n`;
+  if (refs.length === 0) {
+    s += `No coordinate-matched cross-references were auto-detected between the documents. This can happen when the documents share no common clause numbers, dollar amounts, or percentages, or when text extraction was limited (e.g. scanned pages).\n\n`;
+  } else {
+    s += `Auto-detected **${refs.length}** coordinate-mapped matches across the documents: ${byType.clause.length} clause/section, ${byType.amount.length} dollar-amount, and ${byType.percentage.length} percentage matches.\n\n`;
+  }
+
+  s += `## 3. Cross-Reference Analysis\n`;
+  const section = (title, list, fmt) => {
+    if (!list.length) return "";
+    let out = `\n**${title}:**\n`;
+    for (const r of list.slice(0, 30)) out += `- ${fmt(r)}\n`;
+    if (list.length > 30) out += `- _…and ${list.length - 30} more_\n`;
+    return out;
+  };
+  if (refs.length === 0) {
+    s += `No direct matches to report.\n`;
+  } else {
+    s += section("Shared clauses / sections", byType.clause, r => `Clause ${r.keyword} appears in both: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+    s += section("Shared dollar amounts", byType.amount, r => `Amount ${r.keyword}: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+    s += section("Shared percentages (likely allocations)", byType.percentage, r => `${r.keyword}: **[${r.sourceDoc}, Page ${r.sourcePage}]** ↔ **[${r.targetDoc}, Page ${r.targetPage}]**`);
+  }
+  s += `\n`;
+
+  s += `## 4. Discrepancies & Concerns\n`;
+  s += `This is an automated structural match. Each shared value above should be verified in context — a matching dollar amount or percentage in two documents may be consistent (correct) or may indicate a figure that should differ. Manually review each pairing against the source pages.\n\n`;
+
+  s += `## 5. Compliance Notes\n`;
+  s += `Automated cross-referencing cannot assess SIS Act compliance on its own. Use the matched clauses above as a starting point to confirm trust-deed powers align with the investment strategy and member records.\n\n`;
+
+  s += `## 6. Recommendations\n`;
+  s += `- Open each cited page pair (use the cross-reference panel) and confirm the matched values are intentional.\n- For full narrative analysis across all pages, load a larger model (Llama 3.2 3B or Phi 3.5 Mini) which can hold far more document text in context.\n\n`;
+
+  s += `## 7. References\n`;
+  const pagesByDoc = {};
+  for (const r of refs) {
+    (pagesByDoc[r.sourceDoc] = pagesByDoc[r.sourceDoc] || new Set()).add(r.sourcePage);
+    (pagesByDoc[r.targetDoc] = pagesByDoc[r.targetDoc] || new Set()).add(r.targetPage);
+  }
+  const refDocs = Object.keys(pagesByDoc);
+  if (refDocs.length === 0) {
+    s += `No pages cited (no matches detected).\n`;
+  } else {
+    for (const name of refDocs) {
+      const pages = [...pagesByDoc[name]].sort((a, b) => a - b);
+      s += `- **${name}**: pages ${pages.join(", ")}\n`;
+    }
+  }
+  return s;
+}
+
 // ─── Web Search via DuckDuckGo Instant Answer API ───
 // Used by Reviewer agents to research topics on the web.
 async function searchWeb(query) {
@@ -1463,6 +1530,8 @@ function Auto() {
   const memRef = useRef("");
   const busyRef = useRef(false);
   const localEngineRef = useRef(null);
+  const pdfDocNamesRef = useRef(new Set());   // names of loaded docs (dedup)
+  const loadingNamesRef = useRef(new Set());  // names of in-flight PDF extractions (dedup)
   const [localModelId, setLocalModelId] = useState(LOCAL_MODELS[0].id);
   // idle | cached | downloading | loading | ready | error | exportDone
   const [localModelStatus, setLocalModelStatus] = useState("idle");
@@ -1612,6 +1681,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
       allArtifactUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch {} });
     };
   }, []);
+
+  // Keep a fast lookup of loaded document names for upload de-duplication
+  useEffect(() => { pdfDocNamesRef.current = new Set(pdfDocs.map(d => d.name)); }, [pdfDocs]);
 
   // Auto-rebuild cross-reference index whenever documents change
   // Requires at least 2 docs; clears refs when fewer than 2 are loaded
@@ -1914,8 +1986,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
       const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 
       if (isPdf) {
+        // Dedup: skip a PDF whose name is already loaded or currently extracting.
+        // Everything (pdfDocs, coordData, artifacts, Remove) is keyed by name, so a
+        // duplicate name corrupts indexing and makes removal delete both copies.
+        if (pdfDocNamesRef.current.has(file.name) || loadingNamesRef.current.has(file.name)) {
+          setErr(`"${file.name}" is already loaded. Remove it first to re-upload a changed version.`);
+          return;
+        }
+        loadingNamesRef.current.add(file.name);
         // PDF: show immediate placeholder chip so user sees the file was accepted
-        const placeholderId = `pdf-loading-${Date.now()}-${file.name}`;
+        const placeholderId = `pdf-loading-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${file.name}`;
         setAttachments(prev => {
           if (prev.length >= MAX_ATTACHMENTS) return prev;
           return [...prev, { name: file.name, type: "application/pdf", content: "", size: file.size, isPdf: true, pageCount: 0, pageImages: [], _loading: true, _id: placeholderId }];
@@ -1957,6 +2037,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             setCoordData(prev => ({ ...prev, [file.name]: { blocks: structuredBlocks } }));
             // Remove from loading tracker
             setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+            loadingNamesRef.current.delete(file.name);
           } catch (err) {
             console.error("PDF extraction failed:", err);
             setErr(`Failed to process PDF "${file.name}": ${err.message}`);
@@ -1964,7 +2045,14 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             // Remove the loading placeholder on failure
             setAttachments(prev => prev.filter(att => att._id !== placeholderId));
             setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+            loadingNamesRef.current.delete(file.name);
           }
+        };
+        reader.onerror = () => {
+          setErr(`Could not read "${file.name}". Try again.`);
+          setAttachments(prev => prev.filter(att => att._id !== placeholderId));
+          setPdfLoading(prev => prev.filter(p => p.name !== file.name));
+          loadingNamesRef.current.delete(file.name);
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
@@ -2081,14 +2169,28 @@ When multiple documents are uploaded, you MUST perform systematic cross-referenc
 
 **CRITICAL — DEPTH REQUIREMENT**: You MUST analyse content from THROUGHOUT each document, NOT just the first page. Scan and cite content from beginning, middle, and end pages. A shallow answer that only mentions page 1 is UNACCEPTABLE. Reference at least 5+ different pages per document when possible. Cover key clauses, financial figures, member details, compliance items, and governance provisions found on various pages.
 
-### Response Structure for Document Analysis:
-1. **Document Summary**: List each uploaded document with a 1-2 line description and page count
-2. **Key Findings**: Major observations with page citations
-3. **Cross-Reference Analysis**: Comparisons between documents with specific page references from EACH document
-4. **Discrepancies & Concerns**: Explicitly called out with page references from each document
-5. **Compliance Notes**: SIS Act / regulatory requirements and how the documents address (or fail to address) them
-6. **Recommendations**: Actionable next steps based on findings
-7. **References**: Complete list of all document pages cited
+### Response Structure for Document Analysis (MANDATORY — use these exact headings, in this order, every time):
+## 1. Document Summary
+List each uploaded document with a 1-2 line description and its page count.
+## 2. Key Findings
+Major observations, each with a **[Document Name, Page X]** citation.
+## 3. Cross-Reference Analysis
+Direct comparisons between the documents. EVERY comparison must cite BOTH documents: **[Doc A, Page X]** vs **[Doc B, Page Y]**.
+## 4. Discrepancies & Concerns
+A bulleted register of every inconsistency found, each with page references from BOTH documents.
+## 5. Compliance Notes
+SIS Act / regulatory requirements and how the documents address (or fail to address) them.
+## 6. Recommendations
+Actionable next steps based on the findings.
+## 7. References
+Complete list of all document pages cited, grouped by document.
+
+### Output Discipline (CRITICAL for stability and accuracy):
+- Think step by step internally, but output ONLY the final structured analysis above — no preamble, no "I will now…", no restating the task.
+- Write in calm, precise, professional English. Never switch languages. Never emit non-English characters, random symbols, or repeated phrases.
+- State a fact ONCE. Do not repeat sentences or headings.
+- If you genuinely cannot find information for a section, write "No relevant content located in the provided pages." — never invent content or page numbers.
+- Ground EVERY claim in a page citation from the supplied document text. If it is not in the supplied text, do not assert it.
 
 `;
 
@@ -2348,6 +2450,13 @@ Even for simple greetings, update memory with at least the conversation timestam
       const defaultTemp = rp.isSmallModel ? 0.35 : 0.65;
       const temp = Number.isFinite(limits.temperature) ? Math.min(limits.temperature, rp.isSmallModel ? 0.5 : 0.8) : defaultTemp;
       const repetitionPenalty = rp.isSmallModel ? 1.15 : 1.05;
+      // Nucleus sampling: clip the low-probability tail where small models emit
+      // multilingual token-soup and random Unicode runs. Tighter top_p = far more
+      // stable, consistent, deterministic output (critical for cross-referencing).
+      const topP = rp.isSmallModel ? 0.85 : 0.92;
+      // Presence penalty nudges the model to keep moving through new content
+      // (more pages cited) instead of looping on the same phrase.
+      const presencePenalty = rp.isSmallModel ? 0.3 : 0.1;
       const dynamicTimeoutMs = limits.timeoutMs
         || Math.max(timeoutMs, Math.min(900000, Math.floor(90000 + estimateMessagesTokens(msgsToSend) * 10)));
       // Use streaming if onChunk callback is provided
@@ -2357,8 +2466,10 @@ Even for simple greetings, update memory with at least the conversation timestam
           stream = await engine.chat.completions.create({
             messages: msgsToSend,
             temperature: temp,
+            top_p: topP,
             max_tokens: cappedMaxTokens,
             frequency_penalty: repetitionPenalty - 1.0, // OpenAI-compat approximation
+            presence_penalty: presencePenalty,
             stream: true,
           });
         } catch (createErr) {
@@ -2414,8 +2525,10 @@ Even for simple greetings, update memory with at least the conversation timestam
         const resp = await withTimeout(engine.chat.completions.create({
           messages: msgsToSend,
           temperature: temp,
+          top_p: topP,
           max_tokens: cappedMaxTokens,
           frequency_penalty: repetitionPenalty - 1.0,
+          presence_penalty: presencePenalty,
         }), "LLM call");
         const content = resp.choices?.[0]?.message?.content || "";
         return {
@@ -2887,6 +3000,7 @@ Rules:
       streamThrottle.flush(); // Ensure final content is displayed
       if (mainData.usage) setUsage(p => ({ i: p.i + (mainData.usage.prompt_tokens || 0), o: p.o + (mainData.usage.completion_tokens || 0) }));
       let mainRaw = extractRaw(mainData);
+      let usedDeterministicFallback = false;
       if (isCrossRefTask && /please\s+(share|provide|upload).*(document|file|url|link)|need.*(url|link)/i.test(mainRaw)) {
         setActivityStatus("Cross-reference retry: using already uploaded artifacts...");
         const retryMsgs = [
@@ -2900,19 +3014,28 @@ Rules:
         mainRaw = extractRaw(retryData);
       }
       if (isCrossRefTask && looksLikeCrossRefNonAnswer(mainRaw)) {
-        setActivityStatus("Cross-reference continuation: extracting concrete findings...");
-        const continueMsgs = [
-          { role: "system", content: `${mainSystem}\n\nDo the analysis NOW. Output concrete cross-reference findings with page citations from THROUGHOUT each document (not just page 1). Include a discrepancy list. Reference at least 5 different pages per document. Cover financials, compliance, governance, and member details.` },
+        setActivityStatus("Cross-reference retry: forcing structured analysis...");
+        const docList = pdfDocs.map(d => `"${d.name}" (${d.pageCount} pages)`).join(" and ");
+        const forceMsgs = [
+          { role: "system", content: `${mainSystem}\n\nCRITICAL: You MUST output the cross-reference analysis RIGHT NOW. Do NOT plan, do NOT say "I will". Start directly with "## 1. Document Summary" and work through all 7 sections. The documents ${docList} are already loaded above — analyse them.` },
           ...includedMsgs,
-          { role: "assistant", content: mainRaw },
-          { role: "user", content: "Continue immediately with concrete findings, mismatches, and page-based evidence. Do not restate intent." },
         ];
-        const { data: continueData } = await callAI(continueMsgs, {
+        const { data: forceData } = await callAI(forceMsgs, {
           maxTokens: mainMaxTokens,
           timeoutMs: 180000,
         });
-        const continued = extractRaw(continueData);
-        if (continued) mainRaw = continued;
+        const forced = extractRaw(forceData);
+        if (forced && !looksLikeCrossRefNonAnswer(forced)) {
+          mainRaw = forced;
+        } else if (looksLikeCrossRefNonAnswer(mainRaw)) {
+          // Both the model's first attempt and the forced retry failed to produce
+          // a real analysis. Fall back to the deterministic coordinate-index report
+          // so the user ALWAYS gets concrete, page-cited findings — never a planning
+          // preamble or an empty result.
+          const deterministic = buildDeterministicCrossRef(crossRefs, pdfDocs);
+          mainRaw = `_The on-device model could not produce a full narrative cross-reference for documents this large, so here is an auto-generated structural cross-reference built directly from the coordinate-matched index:_\n\n${deterministic}`;
+          usedDeterministicFallback = true;
+        }
       }
       setStreamingText(""); // Clear streaming display
 
@@ -2932,7 +3055,9 @@ Rules:
 
       // Adaptive reflection: small models get 1 pass always (saves GPU time + memory)
       // Larger models: 2 passes for document queries (accuracy matters), 1 for simple
-      const REFLECTION_PASSES = isSmallModelSend ? 1 : (hasDocuments ? 2 : 1);
+      // Deterministic fallback output is already clean and correct — skip reflection
+      // entirely so the weak model can't mangle it.
+      const REFLECTION_PASSES = usedDeterministicFallback ? 0 : (isSmallModelSend ? 1 : (hasDocuments ? 2 : 1));
       const reflectionChecks = [
         { name: "Accuracy & Document Citations", focus: "Check all factual claims, legislative references (SIS Act sections, regulations), dollar amounts, percentages, and dates. Verify EVERY claim about a document references it by name and page number using **[Document Name, Page X]** format. Add missing citations. Ensure no page reference is fabricated. Flag anything incorrect or unsupported." },
         { name: "Completeness, Cross-References & Polish", focus: "Check if any aspect of the user's question was missed. Check cross-references BETWEEN documents — are discrepancies identified? Is the trust deed compared with the investment strategy? Are member statements reconciled? Ensure the response is well-structured, readable, and professional. Ensure <memory_update> tags are present and intact. Ensure a References section lists all cited pages." },
@@ -3005,7 +3130,7 @@ Rules:
       // ─── STEP 5: Verification — only for complex document queries on larger models ───
       // Skip on small models (Qwen 0.5B) — the extra LLM call is too slow and OOM-prone
       let finalRaw = refinedRaw;
-      if (hasDocuments && !isSimpleQuery && !isSmallModelSend) {
+      if (hasDocuments && !isSimpleQuery && !isSmallModelSend && !usedDeterministicFallback) {
         // ─── Abort check ───
         if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -3154,7 +3279,7 @@ CRITICAL: Preserve ALL tags (<memory_update>) exactly.`;
       setStreamingText("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, attachments, pdfDocs, crossRefs, localModelId]);
 
   const clearChat = async () => {
     try { abortRef.current?.abort?.(); } catch {}
@@ -3302,23 +3427,28 @@ ${chatHtml}
     if (!doc) return;
     const safeName = String(doc.name || "document.pdf").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const rawText = String(doc.text || "");
-    const body = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    const regenKind = format === "txt" ? "regen-txt" : "regen-html";
+    const revokeOld = (prev) => {
+      prev.forEach(a => { if (a.kind === regenKind && a.sourceDoc === doc.name) try { URL.revokeObjectURL(a.blobUrl); } catch {} });
+      return prev.filter(a => !(a.kind === regenKind && a.sourceDoc === doc.name));
+    };
     if (format === "txt") {
       const txtBlob = new Blob([rawText], { type: "text/plain" });
       const txtUrl = URL.createObjectURL(txtBlob);
       const txtName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.txt";
-      setExportedArtifacts(prev => [...prev, { id: "regen-txt-" + Date.now(), name: txtName, type: "text/plain", blobUrl: txtUrl, size: txtBlob.size, timestamp: new Date() }]);
+      setExportedArtifacts(prev => [...revokeOld(prev), { id: "regen-txt-" + Date.now(), name: txtName, type: "text/plain", blobUrl: txtUrl, size: txtBlob.size, timestamp: new Date(), kind: regenKind, sourceDoc: doc.name }]);
       try { window.open(txtUrl, "_blank"); } catch {}
       setArtifactsOpen(true);
       return;
     }
+    const body = rawText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${safeName} - Regenerated Artifact</title>
 <style>body{font-family:system-ui,sans-serif;margin:18px;line-height:1.5} .meta{font-size:12px;color:#666;margin-bottom:10px;border-bottom:1px solid #ddd;padding-bottom:8px}</style>
 </head><body><h2>${safeName} — Regenerated Artifact</h2><div class="meta">Pages: ${doc.pageCount || 0} · Generated: ${new Date().toLocaleString()}</div><div>${body}</div></body></html>`;
     const artifactBlob = new Blob([html], { type: "text/html" });
     const artifactUrl = URL.createObjectURL(artifactBlob);
     const artifactName = safeName.replace(/\.pdf$/i, "") + "-regenerated-artifact.html";
-    setExportedArtifacts(prev => [...prev, { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date() }]);
+    setExportedArtifacts(prev => [...revokeOld(prev), { id: "regen-" + Date.now(), name: artifactName, type: "text/html", blobUrl: artifactUrl, size: artifactBlob.size, timestamp: new Date(), kind: regenKind, sourceDoc: doc.name }]);
     try { window.open(artifactUrl, "_blank"); } catch {}
     setArtifactsOpen(true);
   }, []);
@@ -3366,9 +3496,15 @@ ${chatHtml}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", background: "#0d0d14", borderBottom: "1px solid var(--bd)", flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
               <span style={{ fontSize: "14px" }}>{"\uD83D\uDCDA"}</span>
+              {pdfDocs.length > 1 && (
+                <button onClick={() => { setDocTextDraft(null); setDocTextViewerIdx(v => (v - 1 + pdfDocs.length) % pdfDocs.length); }} style={{ background: "none", border: "1px solid var(--bd)", color: "var(--ac2)", cursor: "pointer", fontSize: "14px", padding: "0 6px", borderRadius: "4px", lineHeight: "20px" }} title="Previous document">{"\u2039"}</button>
+              )}
               <span style={{ fontWeight: 700, fontSize: "14px", color: "var(--ac2)" }}>{pdfDocs[docTextViewerIdx].name}</span>
+              {pdfDocs.length > 1 && (
+                <button onClick={() => { setDocTextDraft(null); setDocTextViewerIdx(v => (v + 1) % pdfDocs.length); }} style={{ background: "none", border: "1px solid var(--bd)", color: "var(--ac2)", cursor: "pointer", fontSize: "14px", padding: "0 6px", borderRadius: "4px", lineHeight: "20px" }} title="Next document">{"\u203A"}</button>
+              )}
               <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {pdfDocs[docTextViewerIdx].pageCount} pages · {(pdfDocs[docTextViewerIdx].text.length / 1024).toFixed(0)}KB text · ~{estimateTokens(pdfDocs[docTextViewerIdx].text).toLocaleString()} tokens
+                {pdfDocs.length > 1 ? `(${docTextViewerIdx + 1}/${pdfDocs.length}) ` : ""}{pdfDocs[docTextViewerIdx].pageCount} pages · {(pdfDocs[docTextViewerIdx].text.length / 1024).toFixed(0)}KB text · ~{estimateTokens(pdfDocs[docTextViewerIdx].text).toLocaleString()} tokens
               </span>
             </div>
             <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
@@ -3378,12 +3514,14 @@ ${chatHtml}
               <button onClick={() => { try { navigator.clipboard.writeText(docTextDraft ?? pdfDocs[docTextViewerIdx].text); } catch {} }} style={{ ...btn("#88bbcc") }}>Copy All</button>
               <button onClick={() => {
                 const idx = docTextViewerIdx;
-                const doc = pdfDocs[idx];
-                const newText = docTextDraft ?? doc.text;
-                setPdfDocs(prev => prev.map((d, i) => i === idx ? { ...d, text: newText } : d));
-                // Refresh the editable artifact so it reflects the saved edits
-                createPdfEditArtifact(doc.name, newText, doc.pageCount);
-                setDocTextDraft(null); // edits are now the doc text — clear draft state
+                setPdfDocs(prev => {
+                  const doc = prev[idx];
+                  if (!doc) return prev;
+                  const newText = docTextDraft ?? doc.text;
+                  createPdfEditArtifact(doc.name, newText, doc.pageCount);
+                  return prev.map((d, i) => i === idx ? { ...d, text: newText } : d);
+                });
+                setDocTextDraft(null);
               }} style={{ ...btn("#7ce08a") }}>Save Edits</button>
               <button onClick={() => regeneratePdfArtifact({ ...pdfDocs[docTextViewerIdx], text: (docTextDraft ?? pdfDocs[docTextViewerIdx].text) }, "html")} style={{ ...btn("#7ce08a") }}>Regenerate</button>
               <button onClick={() => {
@@ -3485,19 +3623,18 @@ ${chatHtml}
                           )}
                           <button onClick={() => {
                             const docName = doc.name;
-                            // Close viewers pointing at this doc (or clamp indices) —
-                            // removal shifts array indices and could show the wrong document
+                            const newLen = pdfDocs.length - 1;
                             if (pdfViewerIdx === i) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }
-                            else if (pdfViewerIdx > i) setPdfViewerIdx(v => v - 1);
+                            else if (pdfViewerIdx > i) setPdfViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             if (docTextViewerIdx === i) { setDocTextViewerOpen(false); setDocTextDraft(null); }
-                            else if (docTextViewerIdx > i) setDocTextViewerIdx(v => v - 1);
+                            else if (docTextViewerIdx > i) setDocTextViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
                             setAttachments(prev => prev.filter(a => a.name !== docName));
                             setCoordData(prev => { const n = { ...prev }; delete n[docName]; return n; });
                             setExportedArtifacts(prev => {
-                              const removed = prev.filter(a => a.kind === "pdf-edit-artifact" && a.sourceDoc === docName);
+                              const removed = prev.filter(a => a.sourceDoc === docName);
                               removed.forEach(a => { try { URL.revokeObjectURL(a.blobUrl); } catch {} });
-                              return prev.filter(a => !(a.kind === "pdf-edit-artifact" && a.sourceDoc === docName));
+                              return prev.filter(a => a.sourceDoc !== docName);
                             });
                           }} style={{ ...btn("#cc7777"), fontSize: "9px" }}>Remove</button>
                         </div>
@@ -3829,7 +3966,7 @@ ${chatHtml}
             <button
               onClick={() => {
                 if (pdfDocs.length > 0) {
-                  setDocTextViewerIdx(0);
+                  setDocTextViewerIdx(prev => Math.min(prev, pdfDocs.length - 1));
                   setDocTextViewerOpen(true);
                 } else {
                   setErr("Upload a PDF first to use the PDF editor (use the + button below).");
