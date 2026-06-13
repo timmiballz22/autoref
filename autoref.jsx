@@ -27,8 +27,15 @@ async function getOrCreateSharedEngine(modelId, createFn) {
   if (_sharedEngineInitPromise && _sharedEngineModelId === modelId) return _sharedEngineInitPromise;
   _sharedEngineModelId = modelId;
   _sharedEngineInitPromise = (async () => {
-    _sharedEngine = await createFn();
-    return _sharedEngine;
+    const engine = await createFn();
+    // Guard: if clearSharedEngine() was called while we were loading (user switched
+    // models), don't overwrite the cleared state — unload and discard this engine.
+    if (_sharedEngineModelId !== modelId) {
+      try { await engine?.unload?.(); } catch {}
+      throw new Error("Model load cancelled — a different model was selected.");
+    }
+    _sharedEngine = engine;
+    return engine;
   })();
   try {
     return await _sharedEngineInitPromise;
