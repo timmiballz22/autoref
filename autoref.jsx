@@ -1731,6 +1731,28 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     return () => clearTimeout(t);
   }, [err]);
 
+  // Escape key closes modals in z-order priority (topmost first)
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key !== "Escape") return;
+      if (pdfViewerOpen) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); return; }
+      if (docTextViewerOpen) { setDocTextViewerOpen(false); setDocTextDraft(null); return; }
+      if (crossRefPanelOpen) { setCrossRefPanelOpen(false); return; }
+      if (artifactsOpen) { setArtifactsOpen(false); return; }
+      if (attachMenuOpen) { setAttachMenuOpen(false); return; }
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [pdfViewerOpen, docTextViewerOpen, crossRefPanelOpen, artifactsOpen, attachMenuOpen]);
+
+  // Close attachment menu on any outside click
+  useEffect(() => {
+    if (!attachMenuOpen) return;
+    const close = () => setAttachMenuOpen(false);
+    const timer = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(timer); document.removeEventListener("click", close); };
+  }, [attachMenuOpen]);
+
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
     // Save state to storage (called on interval, visibility change, beforeunload)
@@ -2101,6 +2123,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
+        if (attachmentsRef.current.some(a => a.name === file.name)) {
+          setErr(`"${file.name}" is already attached. Remove it first to re-upload.`);
+          return;
+        }
         if (slotsUsed >= MAX_ATTACHMENTS) {
           setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
           return;
@@ -2110,12 +2136,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
-            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true }];
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true, _id: "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) }];
           });
         };
         reader.onerror = () => setErr(`Could not read image "${file.name}". Try again.`);
         reader.readAsDataURL(file);
       } else {
+        if (attachmentsRef.current.some(a => a.name === file.name)) {
+          setErr(`"${file.name}" is already attached. Remove it first to re-upload.`);
+          return;
+        }
         if (slotsUsed >= MAX_ATTACHMENTS) {
           setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
           return;
@@ -2125,7 +2155,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
-            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false }];
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false, _id: "file-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) }];
           });
         };
         reader.onerror = () => setErr(`Could not read file "${file.name}". Try again.`);
@@ -2894,7 +2924,7 @@ Complete list of all document pages cited, grouped by document.
 
     // Determine query complexity for adaptive pipeline
     const hasDocuments = pdfDocs.length > 0;
-    const isCrossRefTask = hasDocuments && looksLikeCrossRefTask(txt);
+    const isCrossRefTask = pdfDocs.length >= 2 && looksLikeCrossRefTask(txt);
     const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
     let checkpointRaw = ""; // Partial response checkpoint for crash recovery
 
@@ -3361,7 +3391,9 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
     setPdfLoading([]);
     loadingNamesRef.current.clear();
     setDocTextViewerOpen(false);
+    setDocTextViewerIdx(0);
     setPdfViewerOpen(false);
+    setPdfViewerIdx(0);
     setArtifactsOpen(false);
     setExportedArtifacts([]);
     setMem("");
@@ -3653,8 +3685,8 @@ ${chatHtml}
               {pdfLoading.length > 0 && (
                 <div>
                   <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Extracting…</div>
-                  {pdfLoading.map((pl, i) => (
-                    <div key={"al-" + i} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", borderRadius: "6px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.18)", marginBottom: "4px" }}>
+                  {pdfLoading.map((pl) => (
+                    <div key={"al-" + pl.name} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", borderRadius: "6px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.18)", marginBottom: "4px" }}>
                       <span style={{ fontSize: "18px", animation: "pulse 1.5s infinite" }}>📄</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: "11px", color: "#cc9955", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)" }}>{pl.name}</div>
@@ -3807,8 +3839,8 @@ ${chatHtml}
                 <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded{pdfLoading.length > 0 ? `, ${pdfLoading.length} extracting` : ""}</span>
               </div>
               {/* Show PDFs currently being extracted — so user sees them immediately */}
-              {pdfLoading.map((pl, i) => (
-                <div key={"loading-" + i} style={{
+              {pdfLoading.map((pl) => (
+                <div key={"loading-" + pl.name} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
                   borderRadius: "5px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.15)",
                   marginBottom: "4px",
@@ -4001,7 +4033,11 @@ ${chatHtml}
       )}
 
       {/* ═══ MAIN COLUMN ═══ */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+      <div
+        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}
+        onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+        onDrop={e => { e.preventDefault(); e.stopPropagation(); const files = e.dataTransfer?.files; if (files?.length) handleAttachFiles({ target: { files } }); }}
+      >
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -4228,7 +4264,7 @@ ${chatHtml}
                     </button>
                     <div style={{ height: "1px", background: "var(--bd)", margin: "4px 6px" }}></div>
                     <button
-                      onClick={() => { attachInputRef.current?.click(); }}
+                      onClick={() => { attachInputRef.current?.click(); setAttachMenuOpen(false); }}
                       style={{
                         display: "flex", alignItems: "center", gap: "8px", width: "100%",
                         padding: "8px 10px", background: "transparent", border: "none",
@@ -4281,6 +4317,7 @@ ${chatHtml}
                                 content: text.slice(0, 512 * 1024),
                                 size: new Blob([text]).size,
                                 isImage: false,
+                                _id: "clip-" + Date.now(),
                               }];
                             });
                           }
