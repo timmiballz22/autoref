@@ -1568,6 +1568,7 @@ function Auto() {
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
   const [docTextDraft, setDocTextDraft] = useState(null); // null = no edits (show doc text); "" is a valid cleared draft
   const [coordData, setCoordData] = useState({}); // docName -> {blocks: [structuredBlock]}
+  const coordDataRef = useRef({});               // mirror of coordData for synchronous first-turn cross-ref build
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
@@ -1723,6 +1724,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   useEffect(() => { memRef.current = mem; }, [mem]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+  // Mirror coordData so send() can build a FRESH cross-ref index synchronously on the
+  // first turn — the crossRefs state lags one render behind coordData (built via effect),
+  // so a send fired immediately after extraction would otherwise use an empty index.
+  useEffect(() => { coordDataRef.current = coordData; }, [coordData]);
 
   // Auto-dismiss error messages after 8 seconds so stale errors don't linger
   useEffect(() => {
@@ -1730,6 +1735,28 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
     const t = setTimeout(() => setErr(null), 8000);
     return () => clearTimeout(t);
   }, [err]);
+
+  // Escape key closes modals in z-order priority (topmost first)
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key !== "Escape") return;
+      if (pdfViewerOpen) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); return; }
+      if (docTextViewerOpen) { setDocTextViewerOpen(false); setDocTextDraft(null); return; }
+      if (crossRefPanelOpen) { setCrossRefPanelOpen(false); return; }
+      if (artifactsOpen) { setArtifactsOpen(false); return; }
+      if (attachMenuOpen) { setAttachMenuOpen(false); return; }
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [pdfViewerOpen, docTextViewerOpen, crossRefPanelOpen, artifactsOpen, attachMenuOpen]);
+
+  // Close attachment menu on any outside click
+  useEffect(() => {
+    if (!attachMenuOpen) return;
+    const close = () => setAttachMenuOpen(false);
+    const timer = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => { clearTimeout(timer); document.removeEventListener("click", close); };
+  }, [attachMenuOpen]);
 
   // ─── Periodic auto-save + beforeunload + visibility change ───
   useEffect(() => {
@@ -2068,7 +2095,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             // Replace loading placeholder with real extracted content
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
-                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
+                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages, _id: att._id }
                 : att
             ));
             // Store the pre-extraction copy of PDF bytes for the viewer — blob URLs
@@ -2101,6 +2128,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         };
         reader.readAsArrayBuffer(file);
       } else if (file.type.startsWith("image/")) {
+        if (attachmentsRef.current.some(a => a.name === file.name)) {
+          setErr(`"${file.name}" is already attached. Remove it first to re-upload.`);
+          return;
+        }
         if (slotsUsed >= MAX_ATTACHMENTS) {
           setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
           return;
@@ -2110,12 +2141,16 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
-            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true }];
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true, _id: "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) }];
           });
         };
         reader.onerror = () => setErr(`Could not read image "${file.name}". Try again.`);
         reader.readAsDataURL(file);
       } else {
+        if (attachmentsRef.current.some(a => a.name === file.name)) {
+          setErr(`"${file.name}" is already attached. Remove it first to re-upload.`);
+          return;
+        }
         if (slotsUsed >= MAX_ATTACHMENTS) {
           setErr(`Attachment limit reached (${MAX_ATTACHMENTS}). Remove some files before adding "${file.name}".`);
           return;
@@ -2125,7 +2160,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
         reader.onload = () => {
           setAttachments(prev => {
             if (prev.length >= MAX_ATTACHMENTS) return prev;
-            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false }];
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false, _id: "file-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) }];
           });
         };
         reader.onerror = () => setErr(`Could not read file "${file.name}". Try again.`);
@@ -2150,7 +2185,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   }, []);
 
   // ─── System prompt builder ───
-  const buildSystem = useCallback(() => {
+  const buildSystem = useCallback((crossRefsOverride) => {
+    // Use a freshly-built index when provided (first turn), else the reactive state
+    const effectiveCrossRefs = (crossRefsOverride && crossRefsOverride.length) ? crossRefsOverride : crossRefs;
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
     // ─── Compact path: low-memory / very small context (Qwen 0.5B on 8GB devices) ───
@@ -2163,7 +2200,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
 Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Answer directly — do NOT add a memory block unless the user explicitly asks you to remember something. Never fabricate facts or page numbers.
 `;
       if (pdfDocs.length > 0) {
-        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
+        // Pre-computed coordinate-matched cross-reference index — the single most
+        // valuable signal for a small model, so reserve a slice of the budget for it.
+        const xrefText = effectiveCrossRefs.length > 0 ? formatCrossRefsForAI(effectiveCrossRefs) : "";
+        const xrefBudget = xrefText ? Math.min(xrefText.length, Math.floor(maxChars * 0.25)) : 0;
+        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + xrefBudget + 120;
         const docBudgetChars = Math.max(maxChars - reserved, 400);
         const perDocChars = Math.max(Math.floor(docBudgetChars / pdfDocs.length), 200);
         cs += `\n<documents>\n`;
@@ -2171,6 +2212,7 @@ Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. An
           cs += `<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, perDocChars)}\n</document>\n`;
         }
         cs += `</documents>`;
+        if (xrefText) cs += xrefText.slice(0, xrefBudget);
       }
       if (mem && mem.trim()) {
         cs += `\n\n<memory>\n${mem.trim().slice(0, 350)}\n</memory>`;
@@ -2318,7 +2360,7 @@ Complete list of all document pages cited, grouped by document.
       // Inject auto-detected cross-reference index (only for larger models — keeps Qwen prompt tight)
       const runtimeProfile = getRuntimeProfile(localModelId);
       const isSmallModel = runtimeProfile.isSmallModel;
-      if (!isSmallModel && crossRefs.length > 0) s += formatCrossRefsForAI(crossRefs);
+      if (!isSmallModel && effectiveCrossRefs.length > 0) s += formatCrossRefsForAI(effectiveCrossRefs);
     }
 
     // Memory instructions
@@ -2567,6 +2609,10 @@ Complete list of all document pages cited, grouped by document.
             }
           }
         } catch (streamErr) {
+          // Always propagate user-initiated abort so the caller can handle cancellation
+          if (streamErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           // If we got partial content before the stream died, return what we have
           if (content.length > 30) {
             console.warn("Stream interrupted, returning partial content:", streamErr);
@@ -2894,7 +2940,17 @@ Complete list of all document pages cited, grouped by document.
 
     // Determine query complexity for adaptive pipeline
     const hasDocuments = pdfDocs.length > 0;
-    const isCrossRefTask = hasDocuments && looksLikeCrossRefTask(txt);
+    // Build a FRESH cross-ref index from the live coordData mirror so the FIRST turn
+    // after upload has a populated index (crossRefs state lags a render behind).
+    let liveCrossRefs = crossRefs;
+    try {
+      const liveCoord = coordDataRef.current || {};
+      const liveNames = Object.keys(liveCoord);
+      if (liveNames.length >= 2 && (!crossRefs || crossRefs.length === 0)) {
+        liveCrossRefs = buildCrossRefIndex(liveNames.map(name => ({ name, blocks: liveCoord[name].blocks })));
+      }
+    } catch (xe) { console.warn("Live cross-ref build failed:", xe); }
+    const isCrossRefTask = pdfDocs.length >= 2 && looksLikeCrossRefTask(txt);
     const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
     let checkpointRaw = ""; // Partial response checkpoint for crash recovery
 
@@ -2994,12 +3050,13 @@ Rules:
       // NOTE: do not auto-open the PDF viewer/artifacts panel here — modals opening
       // over the chat hid the streaming response and broke the reading flow.
 
-      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
+      // Truncate a COPY for API context — preserve full history for display/storage
+      const apiContextMsgs = currentMsgs.length > MAX_MSGS ? currentMsgs.slice(-MAX_MSGS) : currentMsgs;
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
-      let mainSystem = buildSystem();
-      const artifactContext = buildAttachmentContext(currentMsgs, pdfDocs);
+      let mainSystem = buildSystem(liveCrossRefs);
+      const artifactContext = buildAttachmentContext(apiContextMsgs, pdfDocs);
       if (artifactContext) mainSystem += `\n\n${artifactContext}`;
       // Skip pdfToolContext in compact mode — the compact buildSystem already inlines doc content
       const isCompactMode = runtimeProfile.contextLimit <= 4096;
@@ -3021,7 +3078,7 @@ Rules:
       const msgBudget = Math.max(runtimeCtxBudget - systemTokens - generationReserve, Math.floor(runtimeCtxBudget * 0.20));
 
       // Always keep the latest user message; trim older history to fit budget
-      const mappedMsgs = currentMsgs.map(m => ({ role: m.role, content: m.content }));
+      const mappedMsgs = apiContextMsgs.map(m => ({ role: m.role, content: m.content }));
       let includedMsgs = [];
       let usedMsgTokens = 0;
       // Walk backwards so the most recent messages (including the user's latest) are kept first
@@ -3091,7 +3148,7 @@ Rules:
           // a real analysis. Fall back to the deterministic coordinate-index report
           // so the user ALWAYS gets concrete, page-cited findings — never a planning
           // preamble or an empty result.
-          const deterministic = buildDeterministicCrossRef(crossRefs, pdfDocs);
+          const deterministic = buildDeterministicCrossRef(liveCrossRefs, pdfDocs);
           mainRaw = `_The on-device model could not produce a full narrative cross-reference for documents this large, so here is an auto-generated structural cross-reference built directly from the coordinate-matched index:_\n\n${deterministic}`;
           usedDeterministicFallback = true;
         }
@@ -3180,9 +3237,11 @@ Rules:
           // Update checkpoint after each successful reflection
           checkpointRaw = refinedRaw;
         } catch (reflectErr) {
+          if (reflectErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
           setStreamingText("");
-          // Continue with current refined version — don't crash
         }
       }
 
@@ -3223,10 +3282,15 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
               finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
             }
           }
-        } catch {
+        } catch (verifyErr) {
+          if (verifyErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           finalRaw = refinedRaw; // Fall back to refined response on verification error
         }
       }
+
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
       // ─── Finalise: parse response and update state ───
       const { text, actions } = parseResponse(finalRaw);
@@ -3248,6 +3312,7 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
         // only via explicit <memory_update> from the model or manual edits.
       }
 
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
       setMsgs([...currentMsgs]);
       saveChat(currentMsgs);
 
@@ -3335,7 +3400,9 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
           } catch {}
         }
       }
-      try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
+      if (e.name !== "AbortError") {
+        try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
+      }
     } finally {
       setBusy(false);
       busyRef.current = false;
@@ -3361,8 +3428,11 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
     setPdfLoading([]);
     loadingNamesRef.current.clear();
     setDocTextViewerOpen(false);
+    setDocTextViewerIdx(0);
     setPdfViewerOpen(false);
+    setPdfViewerIdx(0);
     setArtifactsOpen(false);
+    exportedArtifacts.forEach(a => { try { if (a.blobUrl) URL.revokeObjectURL(a.blobUrl); } catch {} });
     setExportedArtifacts([]);
     setMem("");
     setMemDraft("");
@@ -3387,20 +3457,24 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
   const handleNavigateCrossRef = useCallback((ref) => {
     const srcIdx = pdfDocs.findIndex(d => d.name === ref.sourceDoc);
     if (srcIdx < 0) return;
-    const highlights = [];
-    // Source location — green
-    highlights.push({ page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` });
-    if (ref.targetDoc === ref.sourceDoc) {
-      // Same-doc: add blue target highlight directly
-      highlights.push({ page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${ref.keyword}` });
-      setPdfViewerCrossRefTarget(null);
-    } else {
-      // Different doc: store target so PdfViewer can show a navigation banner
-      setPdfViewerCrossRefTarget({ docName: ref.targetDoc, page: ref.targetPage, coords: ref.targetCoords, keyword: ref.keyword });
-    }
+    // Annotate BOTH documents: each highlight is tagged with its docName so the viewer
+    // shows the correct marks for whichever document is on screen. The source mark is
+    // green, the matched location in the other document is blue. Flipping between the two
+    // docs (via the navigation banner) keeps both annotations visible.
+    const highlights = [
+      { docName: ref.sourceDoc, page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` },
+      { docName: ref.targetDoc, page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `${ref.targetDoc === ref.sourceDoc ? "DST" : "MATCH"}: ${ref.keyword}` },
+    ];
     setPdfViewerHighlights(highlights);
     setPdfViewerInitPage(ref.sourcePage);
     setPdfViewerIdx(srcIdx);
+    if (ref.targetDoc === ref.sourceDoc) {
+      setPdfViewerCrossRefTarget(null);
+    } else {
+      // Banner lets the user jump to the matched location in the OTHER document, which
+      // already carries its own (blue) annotation.
+      setPdfViewerCrossRefTarget({ docName: ref.targetDoc, page: ref.targetPage, coords: ref.targetCoords, keyword: ref.keyword });
+    }
     setPdfViewerOpen(true);
     setCrossRefPanelOpen(false);
   }, [pdfDocs]);
@@ -3553,16 +3627,24 @@ ${chatHtml}
         <PdfViewer
           pdfData={pdfDocs[pdfViewerIdx].pdfBytes}
           onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }}
-          highlights={pdfViewerHighlights}
+          highlights={pdfViewerHighlights.filter(h => !h.docName || h.docName === pdfDocs[pdfViewerIdx].name)}
           initialPage={pdfViewerInitPage}
           crossRefTarget={pdfViewerCrossRefTarget}
           onNavigateTarget={(target) => {
             const tgtIdx = pdfDocs.findIndex(d => d.name === target.docName);
-            if (tgtIdx < 0) return;
-            setPdfViewerHighlights([{ page: target.page, ...target.coords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${target.keyword}` }]);
+            if (tgtIdx < 0) { setPdfViewerCrossRefTarget(null); return; }
+            // Keep the full (both-document) highlight set — the viewer filters to the
+            // doc on screen — and flip the banner to point back to where we came from so
+            // the user can toggle between the two annotated documents.
+            const fromDocName = pdfDocs[pdfViewerIdx]?.name;
+            const fromHl = pdfViewerHighlights.find(h => h.docName === fromDocName);
             setPdfViewerInitPage(target.page);
             setPdfViewerIdx(tgtIdx);
-            setPdfViewerCrossRefTarget(null);
+            if (fromDocName && fromHl && fromDocName !== target.docName) {
+              setPdfViewerCrossRefTarget({ docName: fromDocName, page: fromHl.page, coords: { x: fromHl.x, y: fromHl.y, w: fromHl.w, h: fromHl.h, pageHeight: fromHl.pageHeight }, keyword: target.keyword });
+            } else {
+              setPdfViewerCrossRefTarget(null);
+            }
           }}
         />
       )}
@@ -3653,8 +3735,8 @@ ${chatHtml}
               {pdfLoading.length > 0 && (
                 <div>
                   <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.5px" }}>Extracting…</div>
-                  {pdfLoading.map((pl, i) => (
-                    <div key={"al-" + i} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", borderRadius: "6px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.18)", marginBottom: "4px" }}>
+                  {pdfLoading.map((pl) => (
+                    <div key={"al-" + pl.name} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", borderRadius: "6px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.18)", marginBottom: "4px" }}>
                       <span style={{ fontSize: "18px", animation: "pulse 1.5s infinite" }}>📄</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: "11px", color: "#cc9955", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--m)" }}>{pl.name}</div>
@@ -3704,6 +3786,7 @@ ${chatHtml}
                             const newLen = pdfDocs.length - 1;
                             if (pdfViewerIdx === i) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }
                             else if (pdfViewerIdx > i) setPdfViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
+                            if (pdfViewerCrossRefTarget?.docName === doc.name) setPdfViewerCrossRefTarget(null);
                             if (docTextViewerIdx === i) { setDocTextViewerOpen(false); setDocTextDraft(null); }
                             else if (docTextViewerIdx > i) setDocTextViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
@@ -3807,8 +3890,8 @@ ${chatHtml}
                 <span style={{ fontSize: "9px", color: "var(--ac2)", fontFamily: "var(--m)" }}>{pdfDocs.length} loaded{pdfLoading.length > 0 ? `, ${pdfLoading.length} extracting` : ""}</span>
               </div>
               {/* Show PDFs currently being extracted — so user sees them immediately */}
-              {pdfLoading.map((pl, i) => (
-                <div key={"loading-" + i} style={{
+              {pdfLoading.map((pl) => (
+                <div key={"loading-" + pl.name} style={{
                   display: "flex", alignItems: "center", gap: "6px", padding: "4px 6px",
                   borderRadius: "5px", background: "rgba(204,153,85,0.06)", border: "1px solid rgba(204,153,85,0.15)",
                   marginBottom: "4px",
@@ -4001,7 +4084,11 @@ ${chatHtml}
       )}
 
       {/* ═══ MAIN COLUMN ═══ */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+      <div
+        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}
+        onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+        onDrop={e => { e.preventDefault(); e.stopPropagation(); const files = e.dataTransfer?.files; if (files?.length) handleAttachFiles({ target: { files } }); }}
+      >
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -4228,7 +4315,7 @@ ${chatHtml}
                     </button>
                     <div style={{ height: "1px", background: "var(--bd)", margin: "4px 6px" }}></div>
                     <button
-                      onClick={() => { attachInputRef.current?.click(); }}
+                      onClick={() => { attachInputRef.current?.click(); setAttachMenuOpen(false); }}
                       style={{
                         display: "flex", alignItems: "center", gap: "8px", width: "100%",
                         padding: "8px 10px", background: "transparent", border: "none",
@@ -4281,6 +4368,7 @@ ${chatHtml}
                                 content: text.slice(0, 512 * 1024),
                                 size: new Blob([text]).size,
                                 isImage: false,
+                                _id: "clip-" + Date.now(),
                               }];
                             });
                           }
@@ -4399,7 +4487,12 @@ class ErrorBoundary extends React.Component {
     }
   }
   render() {
-    if (this.state.hasError && this.state.retryCount >= 3) {
+    if (this.state.hasError) {
+      if (this.state.retryCount < 3) {
+        return React.createElement("div", {
+          style: { padding: "40px", background: "#07070b", color: "#88bbcc", fontFamily: "monospace", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }
+        }, "Recovering…");
+      }
       return React.createElement("div", {
         style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
       },
