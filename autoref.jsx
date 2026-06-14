@@ -2090,7 +2090,7 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
             // Replace loading placeholder with real extracted content
             setAttachments(prev => prev.map(att =>
               att._id === placeholderId
-                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages }
+                ? { name: file.name, type: "application/pdf", content: text, size: file.size, isPdf: true, pageCount, pageImages, _id: att._id }
                 : att
             ));
             // Store the pre-extraction copy of PDF bytes for the viewer — blob URLs
@@ -2597,6 +2597,10 @@ Complete list of all document pages cited, grouped by document.
             }
           }
         } catch (streamErr) {
+          // Always propagate user-initiated abort so the caller can handle cancellation
+          if (streamErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           // If we got partial content before the stream died, return what we have
           if (content.length > 30) {
             console.warn("Stream interrupted, returning partial content:", streamErr);
@@ -3211,9 +3215,11 @@ Rules:
           // Update checkpoint after each successful reflection
           checkpointRaw = refinedRaw;
         } catch (reflectErr) {
+          if (reflectErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           console.warn(`Reflection pass ${pass + 1} failed:`, reflectErr);
           setStreamingText("");
-          // Continue with current refined version — don't crash
         }
       }
 
@@ -3254,10 +3260,15 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
               finalRaw = verifyRaw + "\n\n" + originalMemoryBlock;
             }
           }
-        } catch {
+        } catch (verifyErr) {
+          if (verifyErr.name === "AbortError" || abortRef.current?.signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
           finalRaw = refinedRaw; // Fall back to refined response on verification error
         }
       }
+
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
       // ─── Finalise: parse response and update state ───
       const { text, actions } = parseResponse(finalRaw);
@@ -3279,6 +3290,7 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
         // only via explicit <memory_update> from the model or manual edits.
       }
 
+      if (abortRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
       setMsgs([...currentMsgs]);
       saveChat(currentMsgs);
 
@@ -3366,7 +3378,9 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
           } catch {}
         }
       }
-      try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
+      if (e.name !== "AbortError") {
+        try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
+      }
     } finally {
       setBusy(false);
       busyRef.current = false;
@@ -3396,6 +3410,7 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
     setPdfViewerOpen(false);
     setPdfViewerIdx(0);
     setArtifactsOpen(false);
+    exportedArtifacts.forEach(a => { try { if (a.blobUrl) URL.revokeObjectURL(a.blobUrl); } catch {} });
     setExportedArtifacts([]);
     setMem("");
     setMemDraft("");
@@ -3737,6 +3752,7 @@ ${chatHtml}
                             const newLen = pdfDocs.length - 1;
                             if (pdfViewerIdx === i) { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }
                             else if (pdfViewerIdx > i) setPdfViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
+                            if (pdfViewerCrossRefTarget?.docName === doc.name) setPdfViewerCrossRefTarget(null);
                             if (docTextViewerIdx === i) { setDocTextViewerOpen(false); setDocTextDraft(null); }
                             else if (docTextViewerIdx > i) setDocTextViewerIdx(v => Math.min(v - 1, Math.max(0, newLen - 1)));
                             setPdfDocs(prev => prev.filter((_, j) => j !== i));
