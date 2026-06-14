@@ -4436,7 +4436,12 @@ class ErrorBoundary extends React.Component {
     }
   }
   render() {
-    if (this.state.hasError && this.state.retryCount >= 3) {
+    if (this.state.hasError) {
+      if (this.state.retryCount < 3) {
+        return React.createElement("div", {
+          style: { padding: "40px", background: "#07070b", color: "#88bbcc", fontFamily: "monospace", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }
+        }, "Recovering…");
+      }
       return React.createElement("div", {
         style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
       },
