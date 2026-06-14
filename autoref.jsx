@@ -1568,6 +1568,7 @@ function Auto() {
   const [docTextViewerIdx, setDocTextViewerIdx] = useState(0);
   const [docTextDraft, setDocTextDraft] = useState(null); // null = no edits (show doc text); "" is a valid cleared draft
   const [coordData, setCoordData] = useState({}); // docName -> {blocks: [structuredBlock]}
+  const coordDataRef = useRef({});               // mirror of coordData for synchronous first-turn cross-ref build
   const [crossRefs, setCrossRefs] = useState([]);  // auto-detected cross-references between docs
   const [crossRefPanelOpen, setCrossRefPanelOpen] = useState(false);
   const [streamingText, setStreamingText] = useState(""); // real-time streaming response
@@ -1723,6 +1724,10 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   useEffect(() => { memRef.current = mem; }, [mem]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+  // Mirror coordData so send() can build a FRESH cross-ref index synchronously on the
+  // first turn — the crossRefs state lags one render behind coordData (built via effect),
+  // so a send fired immediately after extraction would otherwise use an empty index.
+  useEffect(() => { coordDataRef.current = coordData; }, [coordData]);
 
   // Auto-dismiss error messages after 8 seconds so stale errors don't linger
   useEffect(() => {
@@ -2180,7 +2185,9 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
   }, []);
 
   // ─── System prompt builder ───
-  const buildSystem = useCallback(() => {
+  const buildSystem = useCallback((crossRefsOverride) => {
+    // Use a freshly-built index when provided (first turn), else the reactive state
+    const effectiveCrossRefs = (crossRefsOverride && crossRefsOverride.length) ? crossRefsOverride : crossRefs;
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
     // ─── Compact path: low-memory / very small context (Qwen 0.5B on 8GB devices) ───
@@ -2193,7 +2200,11 @@ textarea{width:100%;min-height:78vh;resize:vertical;border:1px solid #2b2b39;bor
 Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. Answer directly — do NOT add a memory block unless the user explicitly asks you to remember something. Never fabricate facts or page numbers.
 `;
       if (pdfDocs.length > 0) {
-        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + 120;
+        // Pre-computed coordinate-matched cross-reference index — the single most
+        // valuable signal for a small model, so reserve a slice of the budget for it.
+        const xrefText = effectiveCrossRefs.length > 0 ? formatCrossRefsForAI(effectiveCrossRefs) : "";
+        const xrefBudget = xrefText ? Math.min(xrefText.length, Math.floor(maxChars * 0.25)) : 0;
+        const reserved = cs.length + (mem ? Math.min(mem.length, 350) : 0) + xrefBudget + 120;
         const docBudgetChars = Math.max(maxChars - reserved, 400);
         const perDocChars = Math.max(Math.floor(docBudgetChars / pdfDocs.length), 200);
         cs += `\n<documents>\n`;
@@ -2201,6 +2212,7 @@ Rules: Cite docs as **[DocName, Page N]**. Cross-reference ALL uploaded docs. An
           cs += `<document name="${doc.name}" pages="${doc.pageCount}">\n${doc.text.slice(0, perDocChars)}\n</document>\n`;
         }
         cs += `</documents>`;
+        if (xrefText) cs += xrefText.slice(0, xrefBudget);
       }
       if (mem && mem.trim()) {
         cs += `\n\n<memory>\n${mem.trim().slice(0, 350)}\n</memory>`;
@@ -2348,7 +2360,7 @@ Complete list of all document pages cited, grouped by document.
       // Inject auto-detected cross-reference index (only for larger models — keeps Qwen prompt tight)
       const runtimeProfile = getRuntimeProfile(localModelId);
       const isSmallModel = runtimeProfile.isSmallModel;
-      if (!isSmallModel && crossRefs.length > 0) s += formatCrossRefsForAI(crossRefs);
+      if (!isSmallModel && effectiveCrossRefs.length > 0) s += formatCrossRefsForAI(effectiveCrossRefs);
     }
 
     // Memory instructions
@@ -2928,6 +2940,16 @@ Complete list of all document pages cited, grouped by document.
 
     // Determine query complexity for adaptive pipeline
     const hasDocuments = pdfDocs.length > 0;
+    // Build a FRESH cross-ref index from the live coordData mirror so the FIRST turn
+    // after upload has a populated index (crossRefs state lags a render behind).
+    let liveCrossRefs = crossRefs;
+    try {
+      const liveCoord = coordDataRef.current || {};
+      const liveNames = Object.keys(liveCoord);
+      if (liveNames.length >= 2 && (!crossRefs || crossRefs.length === 0)) {
+        liveCrossRefs = buildCrossRefIndex(liveNames.map(name => ({ name, blocks: liveCoord[name].blocks })));
+      }
+    } catch (xe) { console.warn("Live cross-ref build failed:", xe); }
     const isCrossRefTask = pdfDocs.length >= 2 && looksLikeCrossRefTask(txt);
     const isSimpleQuery = !hasDocuments && txt.length < 60 && !/\b(analyse|analyze|compare|cross.?ref|review|audit|compliance|strategy|deed)\b/i.test(txt);
     let checkpointRaw = ""; // Partial response checkpoint for crash recovery
@@ -3033,7 +3055,7 @@ Rules:
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
-      let mainSystem = buildSystem();
+      let mainSystem = buildSystem(liveCrossRefs);
       const artifactContext = buildAttachmentContext(apiContextMsgs, pdfDocs);
       if (artifactContext) mainSystem += `\n\n${artifactContext}`;
       // Skip pdfToolContext in compact mode — the compact buildSystem already inlines doc content
@@ -3126,7 +3148,7 @@ Rules:
           // a real analysis. Fall back to the deterministic coordinate-index report
           // so the user ALWAYS gets concrete, page-cited findings — never a planning
           // preamble or an empty result.
-          const deterministic = buildDeterministicCrossRef(crossRefs, pdfDocs);
+          const deterministic = buildDeterministicCrossRef(liveCrossRefs, pdfDocs);
           mainRaw = `_The on-device model could not produce a full narrative cross-reference for documents this large, so here is an auto-generated structural cross-reference built directly from the coordinate-matched index:_\n\n${deterministic}`;
           usedDeterministicFallback = true;
         }
@@ -3435,20 +3457,24 @@ If a <memory_update> block is present, preserve it exactly; if none exists, do N
   const handleNavigateCrossRef = useCallback((ref) => {
     const srcIdx = pdfDocs.findIndex(d => d.name === ref.sourceDoc);
     if (srcIdx < 0) return;
-    const highlights = [];
-    // Source location — green
-    highlights.push({ page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` });
-    if (ref.targetDoc === ref.sourceDoc) {
-      // Same-doc: add blue target highlight directly
-      highlights.push({ page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${ref.keyword}` });
-      setPdfViewerCrossRefTarget(null);
-    } else {
-      // Different doc: store target so PdfViewer can show a navigation banner
-      setPdfViewerCrossRefTarget({ docName: ref.targetDoc, page: ref.targetPage, coords: ref.targetCoords, keyword: ref.keyword });
-    }
+    // Annotate BOTH documents: each highlight is tagged with its docName so the viewer
+    // shows the correct marks for whichever document is on screen. The source mark is
+    // green, the matched location in the other document is blue. Flipping between the two
+    // docs (via the navigation banner) keeps both annotations visible.
+    const highlights = [
+      { docName: ref.sourceDoc, page: ref.sourcePage, ...ref.sourceCoords, color: "rgba(124,224,138,0.38)", strokeColor: "rgba(124,224,138,0.9)", label: `SRC: ${ref.keyword}` },
+      { docName: ref.targetDoc, page: ref.targetPage, ...ref.targetCoords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `${ref.targetDoc === ref.sourceDoc ? "DST" : "MATCH"}: ${ref.keyword}` },
+    ];
     setPdfViewerHighlights(highlights);
     setPdfViewerInitPage(ref.sourcePage);
     setPdfViewerIdx(srcIdx);
+    if (ref.targetDoc === ref.sourceDoc) {
+      setPdfViewerCrossRefTarget(null);
+    } else {
+      // Banner lets the user jump to the matched location in the OTHER document, which
+      // already carries its own (blue) annotation.
+      setPdfViewerCrossRefTarget({ docName: ref.targetDoc, page: ref.targetPage, coords: ref.targetCoords, keyword: ref.keyword });
+    }
     setPdfViewerOpen(true);
     setCrossRefPanelOpen(false);
   }, [pdfDocs]);
@@ -3601,16 +3627,24 @@ ${chatHtml}
         <PdfViewer
           pdfData={pdfDocs[pdfViewerIdx].pdfBytes}
           onClose={() => { setPdfViewerOpen(false); setPdfViewerHighlights([]); setPdfViewerInitPage(1); setPdfViewerCrossRefTarget(null); }}
-          highlights={pdfViewerHighlights}
+          highlights={pdfViewerHighlights.filter(h => !h.docName || h.docName === pdfDocs[pdfViewerIdx].name)}
           initialPage={pdfViewerInitPage}
           crossRefTarget={pdfViewerCrossRefTarget}
           onNavigateTarget={(target) => {
             const tgtIdx = pdfDocs.findIndex(d => d.name === target.docName);
-            if (tgtIdx < 0) return;
-            setPdfViewerHighlights([{ page: target.page, ...target.coords, color: "rgba(136,187,204,0.38)", strokeColor: "rgba(136,187,204,0.9)", label: `DST: ${target.keyword}` }]);
+            if (tgtIdx < 0) { setPdfViewerCrossRefTarget(null); return; }
+            // Keep the full (both-document) highlight set — the viewer filters to the
+            // doc on screen — and flip the banner to point back to where we came from so
+            // the user can toggle between the two annotated documents.
+            const fromDocName = pdfDocs[pdfViewerIdx]?.name;
+            const fromHl = pdfViewerHighlights.find(h => h.docName === fromDocName);
             setPdfViewerInitPage(target.page);
             setPdfViewerIdx(tgtIdx);
-            setPdfViewerCrossRefTarget(null);
+            if (fromDocName && fromHl && fromDocName !== target.docName) {
+              setPdfViewerCrossRefTarget({ docName: fromDocName, page: fromHl.page, coords: { x: fromHl.x, y: fromHl.y, w: fromHl.w, h: fromHl.h, pageHeight: fromHl.pageHeight }, keyword: target.keyword });
+            } else {
+              setPdfViewerCrossRefTarget(null);
+            }
           }}
         />
       )}
