@@ -3024,12 +3024,13 @@ Rules:
       // NOTE: do not auto-open the PDF viewer/artifacts panel here — modals opening
       // over the chat hid the streaming response and broke the reading flow.
 
-      if (currentMsgs.length > MAX_MSGS) currentMsgs = currentMsgs.slice(-MAX_MSGS);
+      // Truncate a COPY for API context — preserve full history for display/storage
+      const apiContextMsgs = currentMsgs.length > MAX_MSGS ? currentMsgs.slice(-MAX_MSGS) : currentMsgs;
 
       // Update query ref so buildSystem can select relevant document chunks
       lastUserQueryRef.current = txt || userContent || "";
       let mainSystem = buildSystem();
-      const artifactContext = buildAttachmentContext(currentMsgs, pdfDocs);
+      const artifactContext = buildAttachmentContext(apiContextMsgs, pdfDocs);
       if (artifactContext) mainSystem += `\n\n${artifactContext}`;
       // Skip pdfToolContext in compact mode — the compact buildSystem already inlines doc content
       const isCompactMode = runtimeProfile.contextLimit <= 4096;
@@ -3051,7 +3052,7 @@ Rules:
       const msgBudget = Math.max(runtimeCtxBudget - systemTokens - generationReserve, Math.floor(runtimeCtxBudget * 0.20));
 
       // Always keep the latest user message; trim older history to fit budget
-      const mappedMsgs = currentMsgs.map(m => ({ role: m.role, content: m.content }));
+      const mappedMsgs = apiContextMsgs.map(m => ({ role: m.role, content: m.content }));
       let includedMsgs = [];
       let usedMsgTokens = 0;
       // Walk backwards so the most recent messages (including the user's latest) are kept first
