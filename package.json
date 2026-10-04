@@ -1,0 +1,23 @@
+{
+  "name": "human-spark",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "remotion studio src/index.ts",
+    "render": "node scripts/render.mjs",
+    "still": "remotion still src/index.ts HumanInnovation out/preview.png --frame=410",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.529",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.529"
+  },
+  "devDependencies": {
+    "@sparticuz/chromium": "^153.0.0",
+    "@types/react": "19.1.16",
+    "@types/react-dom": "19.1.9",
+    "typescript": "5.9.2"
+  }
+}
